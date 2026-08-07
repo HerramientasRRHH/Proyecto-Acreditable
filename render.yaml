@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: proyecto-acreditable
+    runtime: static
+    buildCommand: chmod +x build.sh && ./build.sh
+    staticPublishPath: dist
+    envVars:
+      - key: IA_MODE
+        value: direct
+      - key: IA_ENDPOINT
+        value: https://api.minimax.io/anthropic
+      - key: IA_MODEL
+        value: MiniMax-M3
+      - key: MINIMAX_API_KEY
+        sync: false
+      - key: IA_MAX_TOKENS
+        value: "8000"
+      - key: IA_CHUNK_KB
+        value: "120"
+      - key: IA_OCR_SAMPLE
+        value: "12"
