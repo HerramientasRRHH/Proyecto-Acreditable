@@ -10764,6 +10764,24 @@ function va_extraerDatosLicencia(txt){
       }
     }
   }
+  // Formato "Comprobante de Licencia Médica Electrónica": trae "Fecha Inicio"
+  // y "Fecha término" en una tabla de 2 columnas — el OCR mezcla la columna de
+  // al lado (Lugar/Dirección) en la misma línea, así que el campo "N° Días"
+  // sale ilegible, pero las fechas Inicio/término salen limpias. Igual que con
+  // el formato Mutual, calculamos los días del rango en vez de confiar en ese
+  // campo. Separadores flexibles porque el OCR a veces come el guión (ej.
+  // "1506-2026" en vez de "15-06-2026").
+  if(!fechaInicio||!dias){
+    const mComp=txt.match(/Fecha\s+Inicio[\s\S]{0,20}?(\d{1,2})[-\s]?(\d{1,2})[-\s]?(\d{4})[\s\S]{0,100}?Fecha\s+t[eé]rmino[\s\S]{0,20}?(\d{1,2})[-\s]?(\d{1,2})[-\s]?(\d{4})/i);
+    if(mComp){
+      const dIni=new Date(parseInt(mComp[3],10),parseInt(mComp[2],10)-1,parseInt(mComp[1],10));
+      const dFin=new Date(parseInt(mComp[6],10),parseInt(mComp[5],10)-1,parseInt(mComp[4],10));
+      if(!isNaN(dIni.getTime())&&!isNaN(dFin.getTime())&&dFin>=dIni){
+        fechaInicio=dIni;
+        dias=Math.round((dFin-dIni)/(1000*60*60*24))+1;
+      }
+    }
+  }
   return{fechaInicio,dias};
 }
 function va_diasLicenciaEnPeriodo(fechaInicio,dias,mes,anio){
@@ -11474,9 +11492,29 @@ async function va_validarLiquidaciones(){
         if(esCartaDTVitacura) w.tieneCartaDT = true;
         if(esComprobante) w.tieneComprobante = true;
         if(esLibroFlag){
-          w.tieneLibro = true;
-          if(libroNotasIA) w.libroNotasIA=((w.libroNotasIA?w.libroNotasIA+' | ':'')+libroNotasIA);
-          if(libroNombreIA&&!w.libroNombreIA) w.libroNombreIA=libroNombreIA;
+          if(libroNombreIA){
+            // La IA leyó un nombre en la página — hay que verificar A QUIÉN
+            // corresponde de verdad, NO asumir que es el "currentRut" de
+            // turno (ese rastreo sirve para páginas con RUT propio, pero acá
+            // la página no tiene RUT — es justo el caso que falla si no se
+            // valida el nombre). Si el nombre no matchea con nadie de la
+            // nómina, no se le atribuye a nadie: mejor no encontrar nada que
+            // atribuírselo al trabajador equivocado.
+            const matchLibro=va_matchNombreNomina(libroNombreIA,va_lhFiltered);
+            if(matchLibro){
+              const rutLibro=matchLibro.rutNorm;
+              if(!va_liqMap.has(rutLibro)) va_liqMap.set(rutLibro,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
+                tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false});
+              const wLibro=va_liqMap.get(rutLibro);
+              wLibro.tieneLibro=true;
+              if(libroNotasIA) wLibro.libroNotasIA=((wLibro.libroNotasIA?wLibro.libroNotasIA+' | ':'')+libroNotasIA);
+              if(!wLibro.libroNombreIA) wLibro.libroNombreIA=libroNombreIA;
+            }
+          } else {
+            // Sin nombre leído (heurística vieja sin IA disponible): único
+            // caso donde seguimos confiando en el rastreo de RUT de la página.
+            w.tieneLibro = true;
+          }
         }
         if(esContrato) w.tieneContrato = true;
         if(esCI) w.tieneCI = true;
