@@ -11125,6 +11125,15 @@ async function va_validarLiquidaciones(){
     va_setProg(6,'⏳ Cargando OCR (primera vez, ~15s)…');
     await cargarOCR();
   }
+  // Solo se usa IA para las páginas genuinamente ambiguas (poco texto, con
+  // imagen) donde antes se adivinaba el tipo por la proporción de la página —
+  // ahí es donde se confundía una foto del Libro de Asistencia con una Cédula.
+  const iaLibroKeyOk=!!(document.getElementById('iav-key')&&document.getElementById('iav-key').value);
+  // Límite duro de páginas mandadas a IA por corrida — protección contra gasto
+  // descontrolado de tokens (ej. si algo queda mal clasificado como "ambiguo"
+  // en masa). Al llegar al tope, el resto vuelve a la heurística vieja.
+  const IA_LIBRO_MAX_PAGINAS=window.VA_IA_LIBRO_MAX||30;
+  let iaLibroPaginasUsadas=0;
   for(const buf of dd.buffers){
     try{
       const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
@@ -11242,6 +11251,7 @@ async function va_validarLiquidaciones(){
         let esLiqFisica = false, esPageCI = false, esPageLibro = false;
         let esLiquidacion = false, esLiqEscaneada = false;
         let esLibro = false;
+        let libroNotasIA = null, libroNombreIA = null;
 
         if (txtLen >= 50) {
           if (tieneMarcadorLiq && !esOtroDocText) {
@@ -11258,12 +11268,56 @@ async function va_validarLiquidaciones(){
         } else if (imgCount === 0) {
           esLiquidacion = false;
         } else {
-          if (imgCount === 1 && pdfRatio > 1.05) {
-            esLibro = true;
-          } else if (imgCount >= 3) {
-            esLibro = true;
-          } else {
-            if (pdfRatio >= 0.55 && pdfRatio <= 1.05) {
+          // Zona ambigua (poco texto + imagen): antes se adivinaba el tipo de
+          // página solo por la proporción alto/ancho — eso confundía fotos del
+          // Libro de Asistencia con Cédulas de Identidad (bug real confirmado).
+          // Si hay IA configurada, le preguntamos directamente qué es la página
+          // en vez de adivinar por geometría.
+          let iaResuelto = false;
+          if (iaLibroKeyOk && iaLibroPaginasUsadas < IA_LIBRO_MAX_PAGINAS) {
+            iaLibroPaginasUsadas++;
+            try {
+              const vpIA = page.getViewport({scale: 2.0});
+              const cvIA = document.createElement('canvas');
+              cvIA.width = vpIA.width; cvIA.height = vpIA.height;
+              await page.render({canvasContext: cvIA.getContext('2d'), viewport: vpIA}).promise;
+              const blobIA = await new Promise(res => cvIA.toBlob(res, 'image/jpeg', 0.82));
+              const base64IA = await new Promise(res => {
+                const rd = new FileReader();
+                rd.onloadend = () => res(rd.result.split(',')[1]);
+                rd.readAsDataURL(blobIA);
+              });
+              const respIA = await va_iaLeerImagen(base64IA,
+                'Esta es una página de un legajo de RRHH chileno, dentro de un lote de Liquidaciones de Sueldo. '+
+                'Decime en JSON: {"tipo":"LIBRO_ASISTENCIA","nombre_trabajador":"...","notas":"..."} donde '+
+                'LIBRO_ASISTENCIA es una foto de un cuaderno rayado con columnas de entrada/salida por día '+
+                '(puede tener escritura a mano). Si es otra cosa (cédula de identidad, contrato, certificado, '+
+                'liquidación), usá "tipo":"OTRO". "nombre_trabajador" es el nombre escrito en la cabecera de la '+
+                'página (si hay). "notas" es un resumen breve de qué marca el cuaderno para el mes completo '+
+                '(ej: "Falta día 11, Permiso días 13 y 26" — mencioná Falta/Permiso/Licencia si aparecen). '+
+                'Respondé SOLO el JSON.');
+              const mIA = respIA.match(/\{[\s\S]*\}/);
+              if (mIA) {
+                const parsedIA = JSON.parse(mIA[0]);
+                if (parsedIA.tipo === 'LIBRO_ASISTENCIA') {
+                  esLibro = true;
+                  libroNombreIA = parsedIA.nombre_trabajador || null;
+                  libroNotasIA = parsedIA.notas || null;
+                } else {
+                  esPageCI = false; // "OTRO" — no forzamos ninguna categoría por adivinanza
+                }
+                iaResuelto = true;
+              }
+            } catch (eIA) { console.warn('IA clasificación de página falló:', eIA); }
+          }
+          if (!iaResuelto) {
+            // Sin IA disponible: heurística vieja (menos confiable, se sabe que
+            // puede confundir Libro con CI)
+            if (imgCount === 1 && pdfRatio > 1.05) {
+              esLibro = true;
+            } else if (imgCount >= 3) {
+              esLibro = true;
+            } else if (pdfRatio >= 0.55 && pdfRatio <= 1.05) {
               if (pdfRatio < 0.72) {
                 esPageCI = true;
               } else {
@@ -11413,7 +11467,11 @@ async function va_validarLiquidaciones(){
         if(esCertVacacText) w.tieneCertVacac = true;
         if(esCartaDTVitacura) w.tieneCartaDT = true;
         if(esComprobante) w.tieneComprobante = true;
-        if(esLibroFlag) w.tieneLibro = true;
+        if(esLibroFlag){
+          w.tieneLibro = true;
+          if(libroNotasIA) w.libroNotasIA=((w.libroNotasIA?w.libroNotasIA+' | ':'')+libroNotasIA);
+          if(libroNombreIA&&!w.libroNombreIA) w.libroNombreIA=libroNombreIA;
+        }
         if(esContrato) w.tieneContrato = true;
         if(esCI) w.tieneCI = true;
         if(esAntec) w.tieneAntec = true;
@@ -11444,11 +11502,22 @@ async function va_validarLiquidaciones(){
     }catch(e){console.error('Liq error:',e);}
   }
   // ── PROPAGACIÓN SECTION-WIDE DEL LIBRO DE ASISTENCIA ──
-  let _pdfTieneLibro = false;
-  va_liqMap.forEach(w => { if(w.tieneLibro) _pdfTieneLibro = true; });
-  if(_pdfTieneLibro){
-    va_liqMap.forEach(w => { w.tieneLibro = true; });
-    console.log('[Libro section-wide] propagado a', va_liqMap.size, 'trabajadores');
+  // Con IA configurada, cada página del Libro ya se atribuye al trabajador
+  // correcto (por nombre), así que NO propagamos — sería perder precisión real
+  // por una aproximación vieja. Sin IA, se mantiene como respaldo aproximado
+  // (mejor una señal imprecisa que ninguna, en modo degradado).
+  if(!iaLibroKeyOk){
+    let _pdfTieneLibro = false;
+    va_liqMap.forEach(w => { if(w.tieneLibro) _pdfTieneLibro = true; });
+    if(_pdfTieneLibro){
+      va_liqMap.forEach(w => { w.tieneLibro = true; });
+      console.log('[Libro section-wide] propagado a', va_liqMap.size, 'trabajadores (sin IA configurada)');
+    }
+  }
+  // Nota interna (solo consola del navegador, no visible en la app) de cuántas
+  // páginas usaron IA en esta corrida — útil para debug, no para el usuario.
+  if(iaLibroKeyOk){
+    console.log('[Libro IA] páginas usadas:', iaLibroPaginasUsadas, '/', IA_LIBRO_MAX_PAGINAS);
   }
 }
 
