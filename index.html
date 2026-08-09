@@ -11265,14 +11265,20 @@ async function va_validarLiquidaciones(){
           } else if (esLibroText) {
             esLibro = true;
           }
-        } else if (imgCount === 0) {
+        }
+        // Zona ambigua: entra acá TANTO si había poco texto desde el principio
+        // COMO si el OCR sacó ≥50 caracteres pero ninguno matcheó nada — bug
+        // real confirmado: una página del Libro de Asistencia generó 65
+        // caracteres de ruido OCR (cruzando el umbral de 50) sin decir nada
+        // legible, y por eso nunca llegaba a intentar con IA. Antes acá se
+        // adivinaba el tipo de página solo por la proporción alto/ancho, lo
+        // que confundía fotos del Libro con Cédulas de Identidad.
+        const yaClasificada = esLiquidacion || esPageCI || esLibro;
+        if (!yaClasificada && imgCount === 0) {
           esLiquidacion = false;
-        } else {
-          // Zona ambigua (poco texto + imagen): antes se adivinaba el tipo de
-          // página solo por la proporción alto/ancho — eso confundía fotos del
-          // Libro de Asistencia con Cédulas de Identidad (bug real confirmado).
-          // Si hay IA configurada, le preguntamos directamente qué es la página
-          // en vez de adivinar por geometría.
+        } else if (!yaClasificada) {
+          // Si hay IA configurada, le preguntamos directamente qué es la
+          // página en vez de adivinar por geometría.
           let iaResuelto = false;
           if (iaLibroKeyOk && iaLibroPaginasUsadas < IA_LIBRO_MAX_PAGINAS) {
             iaLibroPaginasUsadas++;
