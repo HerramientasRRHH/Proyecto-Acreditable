@@ -10612,6 +10612,7 @@ const VA_BASES={
     docs:[{id:'liq',label:'Liquidaciones',icon:'📄',accept:'.pdf',multi:true,tip:''},{id:'f30',label:'F30',icon:'📋',accept:'.pdf',multi:false,tip:''},{id:'f301',label:'F30-1',icon:'📋',accept:'.pdf',multi:false,tip:''},{id:'previred',label:'PreviRed',icon:'💰',accept:'.pdf',multi:false,tip:''},{id:'finiq',label:'Finiquitos',icon:'📑',accept:'.pdf',multi:true,tip:''},{id:'contratos',label:'Contratos+CI',icon:'📝',accept:'.pdf',multi:true,tip:''},{id:'nomina',label:'Nóminas',icon:'📊',accept:'.xlsx,.xls',multi:true,tip:''},{id:'exencion',label:'Exención Cotizar',icon:'👴',accept:'.pdf',multi:true,tip:''}]}
 };
 let va_lhAll=[],va_lhFiltered=[],va_baseKey=null,va_sectorKey=null,va_subarea=null,va_licMedRuts=new Set();
+let va_licMedDiasPorRut=new Map(); // rutNorm -> días de licencia que caen en el mes auditado, según el documento
 let va_docsData={},va_liqMap=new Map(),va_resultados=[],va_docResults={},va_subtabActiva='liq';
 let va_periodoMes=null,va_periodoAnio=null; // Fix 1: periodo extraído del LH
 
@@ -10683,6 +10684,281 @@ function va_findAllRuts(txt){
     va_addRut(ruts,m[1]+m[2]+m[3]+m[4]+m[5]+m[6]+m[7]+'-'+m[8]);
   }
   return ruts;
+}
+
+// ── Dígito verificador chileno (módulo 11) — para validar/corregir RUTs ruidosos de OCR ──
+function va_dvRut(cuerpo){
+  let suma=0, mult=2;
+  for(let i=cuerpo.length-1;i>=0;i--){
+    suma+=parseInt(cuerpo[i],10)*mult;
+    mult=(mult===7)?2:mult+1;
+  }
+  const resto=11-(suma%11);
+  if(resto===11)return '0';
+  if(resto===10)return 'K';
+  return String(resto);
+}
+function va_rutValido(cuerpo,dv){
+  if(!/^\d{7,8}$/.test(cuerpo))return false;
+  return va_dvRut(cuerpo)===String(dv).toUpperCase();
+}
+// Busca, dentro de una cadena de dígitos ruidosa (con posibles dígitos de más/menos
+// por artefactos de OCR en bordes de casillas), el RUT cuyo dígito verificador
+// calculado coincide de verdad — prioriza coincidencia con la nómina real (LH).
+function va_extraerRutConChecksum(digitosCrudos,listaValidos){
+  const soloDig=(digitosCrudos||'').replace(/[^0-9kK]/g,'');
+  const candidatos=[];
+  for(let len=7;len<=8;len++){
+    for(let start=0;start+len+1<=soloDig.length;start++){
+      const cuerpo=soloDig.slice(start,start+len);
+      const dv=soloDig[start+len];
+      if(va_rutValido(cuerpo,dv))candidatos.push(cuerpo+'-'+dv.toUpperCase());
+    }
+  }
+  if(!candidatos.length)return null;
+  // Estricto: si tenemos la nómina real, SOLO aceptamos un candidato que esté
+  // efectivamente ahí. Un RUT con checksum válido pero que no es de ningún
+  // trabajador de la base es casi seguro ruido de OCR — mejor no encontrar
+  // nada que devolver un RUT inventado.
+  if(listaValidos)return candidatos.find(r=>listaValidos.has(r))||null;
+  return candidatos[0];
+}
+
+// ── Días de Licencia Médica que caen dentro del mes auditado ──
+// Una licencia puede empezar en un mes y terminar en otro (ej. inicio 28/05,
+// 7 días → termina 03/06). El LH solo informa los días que corresponden AL MES
+// que se está auditando (en el ejemplo, 3 días de junio), no el total de la
+// licencia. Por eso comparamos día por día contra el período, no el total.
+function va_extraerDatosLicencia(txt){
+  // El formulario Minsal/licencia.cl trae las DOS fechas (Otorgamiento e Inicio
+  // Reposo) juntas, una fila de etiquetas y la fila de valores debajo con los
+  // 16 dígitos seguidos (8+8) — hay que tomar el SEGUNDO grupo de 8, no el
+  // primero, porque "FECHA INICIO REPOSO" sola matchea por proximidad el valor
+  // de Otorgamiento (que casi siempre es el mismo día, por eso el bug pasaba
+  // desapercibido en las pruebas).
+  const mFechas=txt.match(/FECHA\s*OTORGAMIENTO\s*FECHA\s*INICIO\s*REPOSO\s*EDAD\s*SEXO[\s\S]{0,10}?(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)\s*(\d)/i);
+  // Igual con los días: "Nº DE DIAS" y "Nº DE DIAS EN PALABRAS" son dos
+  // columnas que comparten fila de etiquetas — hay que anclar a las DOS
+  // etiquetas juntas para saber que lo que sigue es el valor numérico (no el
+  // valor en palabras, que viene después).
+  const mDias=txt.match(/N[ºo°]?\s*DE\s*D[IÍ]AS\s*N[ºo°]?\s*DE\s*D[IÍ]AS\s*EN\s*PALABRAS[\s\S]{0,40}?(\d)\s*(\d)?\b/i);
+  let fechaInicio=null,dias=null;
+  if(mFechas){
+    const g=mFechas.slice(1,17);
+    const d=g[8]+g[9],mo=g[10]+g[11],y=g[12]+g[13]+g[14]+g[15];
+    const dt=new Date(parseInt(y,10),parseInt(mo,10)-1,parseInt(d,10));
+    if(!isNaN(dt.getTime())&&dt.getMonth()===parseInt(mo,10)-1)fechaInicio=dt;
+  }
+  if(mDias)dias=parseInt(mDias[1]+(mDias[2]||''),10);
+  // Formato alternativo "Orden de Reposo" (Mutual de Seguridad/ACHS/IST): trae
+  // "Desde" y "Hasta" directo, en vez de fecha inicio + cantidad de días — es más
+  // simple y más confiable (nada de casillas dígito-por-dígito).
+  if(!fechaInicio||!dias){
+    const mRango=txt.match(/Fecha\s+de\s+Reposo\s+Laboral\s+Desde\s*:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*Hasta\s*:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i);
+    if(mRango){
+      const dIni=new Date(parseInt(mRango[3],10),parseInt(mRango[2],10)-1,parseInt(mRango[1],10));
+      const dFin=new Date(parseInt(mRango[6],10),parseInt(mRango[5],10)-1,parseInt(mRango[4],10));
+      if(!isNaN(dIni.getTime())&&!isNaN(dFin.getTime())&&dFin>=dIni){
+        fechaInicio=dIni;
+        dias=Math.round((dFin-dIni)/(1000*60*60*24))+1;
+      }
+    }
+  }
+  return{fechaInicio,dias};
+}
+function va_diasLicenciaEnPeriodo(fechaInicio,dias,mes,anio){
+  if(!fechaInicio||!dias||!mes||!anio)return null;
+  let count=0;
+  for(let i=0;i<dias;i++){
+    const d=new Date(fechaInicio);
+    d.setDate(d.getDate()+i);
+    if(d.getMonth()+1===mes&&d.getFullYear()===anio)count++;
+  }
+  return count;
+}
+
+// ── Finiquito sin sello de notaría: evidencia alternativa aceptada ──
+// Sin legalización notarial, el finiquito debe venir respaldado por AL MENOS UNO
+// de estos documentos (validado con finiquitos reales de Lo Barnechea):
+//  · Vale Vista (comprobante de pago bancario, banco Santander u otro)
+//  · Comprobante de Carta de Aviso de la Dirección del Trabajo (envío por internet)
+//  · Carta de aviso de término directa de la empresa, con sello/firma de la empresa
+//  · Envío por correo certificado (Correos Chile u otro courier con acuse)
+//  · Carta judicial / notificación de tribunal
+function va_tieneComprobanteFiniquitoAlt(txt){
+  const esValeVista=/VALE\s*VISTA/i.test(txt);
+  const esCartaAvisoDT=/COMPROBANTE\s+DE\s+CARTA\s+DE\s+AVISO/i.test(txt)&&/DIRECCI[OÓ]N\s+DEL\s+TRABAJO/i.test(txt);
+  const esCartaEmpresa=/comunica\s+t[eé]rmino\s+de\s+contrato/i.test(txt)||(/aviso/i.test(txt)&&/t[eé]rmino\s+de(l)?\s+contrato/i.test(txt)&&/Ref\.?\s*:/i.test(txt));
+  const esCorreoCertificado=/CORREOS\s+CHILE/i.test(txt)||/FORMULARIO\s+ADMISI[OÓ]N\s+ENV[IÍ]OS\s+REGISTRAD/i.test(txt)||/CARTA\s+CERTIFICADA/i.test(txt);
+  const esCartaJudicial=/CARTA\s+JUDICIAL/i.test(txt)||(/JUZGADO|TRIBUNAL/i.test(txt)&&/notificaci[oó]n/i.test(txt));
+  const esRenunciaDT=/RENUNCIA\s+VOLUNTARIA/i.test(txt)&&/DIRECCI[OÓ]N\s+DEL\s+TRABAJO/i.test(txt);
+  return esValeVista||esCartaAvisoDT||esCartaEmpresa||esCorreoCertificado||esCartaJudicial||esRenunciaDT;
+}
+
+// ── RUT a 1 solo caracter de distancia de la nómina (típico: un dígito mal
+// leído por OCR, ej. "7.172.575-k" en vez de "7.772.575-k") ──
+// Solo corrige si hay EXACTAMENTE un RUT de la nómina a esa distancia — si dos
+// candidatos empatan, no se puede saber cuál es el correcto y no se corrige.
+function va_matchRutCercano(rutCandidato,listaValidos){
+  if(!rutCandidato)return null;
+  let mejor=null,mejorDist=Infinity,segundoDist=Infinity;
+  for(const r of listaValidos){
+    const dist=va_distanciaLevenshtein(rutCandidato,r);
+    if(dist<mejorDist){segundoDist=mejorDist;mejorDist=dist;mejor=r;}
+    else if(dist<segundoDist){segundoDist=dist;}
+  }
+  if(mejor==null||mejorDist>1)return null;
+  if(segundoDist-mejorDist<1)return null;
+  return mejor;
+}
+
+// ── OCR de respaldo para el RUN de Licencia Médica (formulario Minsal/licencia.cl) ──
+// SOLO se usa cuando la página no tiene texto embebido suficiente (escaneada/en papel).
+// Recorta la fila "A.1 IDENTIFICACIÓN DEL TRABAJADOR", que está en la misma posición
+// en todo Chile (es un formulario único), y hace OCR restringido a dígitos+guión
+// para minimizar la confusión con las líneas de las casillas.
+async function va_ocrRunLicenciaMedica(page){
+  if(!ren_ocrWorker)return null;
+  try{
+    const vp=page.getViewport({scale:3.5});
+    const canvas=document.createElement('canvas');
+    canvas.width=vp.width;canvas.height=vp.height;
+    await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+    // Zona de la sección "A.1 IDENTIFICACIÓN DEL TRABAJADOR" (apellidos+nombres+RUN+
+    // fecha+edad+sexo), posición fija en el formulario Minsal/licencia.cl. A propósito
+    // NO recortamos angosto a la columna del RUN — calibrar esa columna a ciegas
+    // (sin una muestra real escaneada) resultó frágil. Preferimos una franja más
+    // ancha con más ruido y dejar que el checksum (contra la nómina real) filtre
+    // el candidato correcto en vez de depender de un recorte pixel-perfecto.
+    const zx0=0,zy0=Math.round(vp.height*0.09);
+    const zx1=vp.width,zy1=Math.round(vp.height*0.24);
+    const zCanvas=document.createElement('canvas');
+    zCanvas.width=zx1-zx0;zCanvas.height=zy1-zy0;
+    zCanvas.getContext('2d').drawImage(canvas,zx0,zy0,zx1-zx0,zy1-zy0,0,0,zx1-zx0,zy1-zy0);
+    const blob=await new Promise(res=>zCanvas.toBlob(res,'image/png'));
+    let text='';
+    try{
+      await ren_ocrWorker.setParameters({tessedit_char_whitelist:'0123456789-'});
+      const r=await ren_ocrWorker.recognize(blob);
+      text=(r&&r.data&&r.data.text)||'';
+    }finally{
+      await ren_ocrWorker.setParameters({tessedit_char_whitelist:''});
+    }
+    return text;
+  }catch(e){console.warn('OCR RUN Licencia Médica falló:',e);return null;}
+}
+
+// ── Match de nombre difuso contra la nómina (LH) ──
+// El nombre (leído por OCR o por IA) suele ser mucho más confiable que el RUT en
+// casillas/manuscrito, porque tanto Tesseract como los modelos de lenguaje reconocen
+// palabras reales. Usamos esto para recuperar el RUT correcto en vez de confiar en
+// dígitos sueltos ruidosos.
+function va_normalizarNombre(s){
+  return (s||'').toUpperCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .replace(/[^A-Z\s]/g,' ')
+    .replace(/\s+/g,' ').trim();
+}
+function va_distanciaLevenshtein(a,b){
+  const m=a.length,n=b.length;
+  const dp=Array.from({length:m+1},()=>new Array(n+1).fill(0));
+  for(let i=0;i<=m;i++)dp[i][0]=i;
+  for(let j=0;j<=n;j++)dp[0][j]=j;
+  for(let i=1;i<=m;i++)for(let j=1;j<=n;j++){
+    dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j-1],dp[i-1][j],dp[i][j-1]);
+  }
+  return dp[m][n];
+}
+// Devuelve el trabajador de la nómina cuyo nombre más se parece al leído, o null si
+// la mejor coincidencia es demasiado distinta o hay ambigüedad entre dos candidatos.
+function va_matchNombreNomina(nombreLeido,listaLH){
+  const norm=va_normalizarNombre(nombreLeido);
+  if(!norm||!listaLH||!listaLH.length)return null;
+  let mejor=null,mejorDist=Infinity,segundoDist=Infinity;
+  for(const t of listaLH){
+    const nombreLH=va_normalizarNombre(t.nombre);
+    if(!nombreLH)continue;
+    const dist=va_distanciaLevenshtein(norm,nombreLH);
+    if(dist<mejorDist){segundoDist=mejorDist;mejorDist=dist;mejor=t;}
+    else if(dist<segundoDist){segundoDist=dist;}
+  }
+  if(!mejor)return null;
+  const umbral=Math.max(2,Math.round(mejor.nombre.length*0.25));
+  if(mejorDist>umbral)return null;
+  if(segundoDist-mejorDist<2)return null;
+  return mejor;
+}
+
+// ── Llamada genérica a la IA visual (MiniMax, endpoint Anthropic-compatible) ──
+// Reutiliza la configuración ya cargada en el panel "Configuración del motor IA"
+// (Paso 6). No guarda ni loguea la imagen ni la key en ningún lado.
+// IMPORTANTE: en modo directo (desde el navegador), el preflight CORS de
+// api.minimax.io solo admite los headers Authorization y Content-Type — agregar
+// x-api-key o anthropic-version hace que el navegador bloquee la llamada antes de
+// que salga (mismo motivo que ya resolvió iav_llm() para el modo texto). En modo
+// proxy no hay CORS y el backend intermedio puede mandar los headers que necesite.
+async function va_iaLeerImagen(base64Png,promptTexto,maxTokens){
+  const c=iav_readCfg();
+  const url=c.mode==='proxy'
+    ?(c.endpoint.startsWith('http')||c.endpoint.startsWith('/')?c.endpoint:'/'+c.endpoint)
+    :c.endpoint+'/v1/messages';
+  const headers={'Content-Type':'application/json'};
+  if(c.mode==='direct'){
+    if(!c.apiKey)throw new Error('Falta la API Key de MiniMax (⚙ Configuración del motor IA).');
+    headers['Authorization']='Bearer '+c.apiKey;
+  }
+  const body={
+    model:c.model,max_tokens:maxTokens||300,
+    messages:[{role:'user',content:[
+      {type:'text',text:promptTexto},
+      {type:'image',source:{type:'base64',media_type:'image/png',data:base64Png}}
+    ]}]
+  };
+  let resp;
+  try{
+    resp=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
+  }catch(netErr){
+    throw new Error('No se pudo contactar el motor IA ('+url+'). Si es un error de CORS o red, '+
+      'cambia a modo proxy. Detalle: '+netErr.message);
+  }
+  const raw=await resp.text();
+  if(!resp.ok){
+    let msg=raw;
+    try{const j=JSON.parse(raw);msg=(j.error&&j.error.message)||(j.base_resp&&j.base_resp.status_msg)||j.message||raw;}catch(e){}
+    throw new Error('HTTP '+resp.status+' — '+String(msg).slice(0,400));
+  }
+  let data;
+  try{data=JSON.parse(raw);}catch(e){throw new Error('Respuesta no es JSON válido: '+raw.slice(0,200));}
+  if(Array.isArray(data.content)){
+    const txt=data.content.filter(b=>b&&b.type==='text').map(b=>b.text).join('\n').trim();
+    if(txt)return txt;
+  }
+  throw new Error('La respuesta no contiene texto utilizable.');
+}
+// Recorta una página a la zona de identificación (o la hoja completa si no se
+// especifica) y la manda a la IA pidiendo nombre/RUT en JSON. Devuelve el objeto
+// parseado o null si falla la llamada o el parseo.
+async function va_iaLeerNombreRut(page,promptExtra){
+  const vp=page.getViewport({scale:2.2});
+  const canvas=document.createElement('canvas');
+  canvas.width=vp.width;canvas.height=vp.height;
+  await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+  const blob=await new Promise(res=>canvas.toBlob(res,'image/png',0.85));
+  const base64=await new Promise(res=>{
+    const reader=new FileReader();
+    reader.onloadend=()=>res(reader.result.split(',')[1]);
+    reader.readAsDataURL(blob);
+  });
+  const prompt=(promptExtra||'Esta es una página de un documento de RRHH chileno.')+
+    ' Decime el nombre completo y el RUT del trabajador que aparece (aunque esté'+
+    ' manuscrito). Respondé SOLO en JSON: {"nombre":"...","rut":"..."}. Si no hay'+
+    ' un trabajador identificable, respondé {"nombre":null,"rut":null}.';
+  try{
+    const texto=await va_iaLeerImagen(base64,prompt);
+    const m=texto.match(/\{[\s\S]*\}/);
+    if(!m)return null;
+    return JSON.parse(m[0]);
+  }catch(e){console.warn('IA leer nombre/RUT falló:',e);return null;}
 }
 
 // ── PASO 1: LH ──
@@ -10926,7 +11202,9 @@ async function va_validarLiquidaciones(){
           || (/\bRUN\b/i.test(txt) && /NACIMIENTO/i.test(txt))
           || (/\bRUN\b/i.test(txt) && /VENCIMIENTO/i.test(txt))
           || (/NACIONALIDAD/i.test(txt) && /(SEXO|NACIMIENTO|VENCIMIENTO)/i.test(txt))
-          || (/(C\.?\s*I\.?|c[eé]dula)/i.test(txt)
+          // Fix: sin \b esto matcheaba el "ci" DENTRO de "Liquidación", clasificando
+          // liquidaciones normales como CI apenas mencionaran "Chile" en cualquier parte.
+          || (/(\bC\.I\.?\b|c[eé]dula)/i.test(txt)
               && /(identidad|nacional|chile|registro|civil|n[oº°]?\s*\d{7,9})/i.test(txt) && txtLen < 2500)
           || (txtLen < 800 && (
                 (/REGISTRO/i.test(txt) && /CIVIL/i.test(txt))
@@ -10938,7 +11216,11 @@ async function va_validarLiquidaciones(){
              (/Licencia\s+M[eé]dica/i.test(txt)
               && (/COMPIN/i.test(txt) || /MINISTERIO\s+DE\s+SALUD/i.test(txt)
                   || /SECCI[OÓ]N\s+A\s*:/i.test(txt) || /DOCUMENTO\s+NO\s+V[AÁ]LIDO\s+PARA\s+TR[AÁ]MITES/i.test(txt)))
-          || /Comprobante\s+de\s+Licencia\s+M[eé]dica\s+Electr[oó]nica/i.test(txt);
+          || /Comprobante\s+de\s+Licencia\s+M[eé]dica\s+Electr[oó]nica/i.test(txt)
+          // Formato alternativo: "Orden de Reposo Ley N° 16.744" (Mutual de Seguridad,
+          // ACHS, IST — licencias por accidente/enfermedad laboral, no COMPIN)
+          || (/ORDEN\s+DE\s+REPOSO/i.test(txt) && /16\.?744/.test(txt))
+          || (/Incapacidad\s+Temporal/i.test(txt) && /Mutual\s+de\s+Seguridad|ACHS|IST\b/i.test(txt));
 
         const esComprobanteText =
              /Comprobante\s+Pago\s+Remuneraciones/i.test(txt)
@@ -11088,6 +11370,16 @@ async function va_validarLiquidaciones(){
         const pageRuts=va_findAllRuts(txt);
         let pageRut=null;
         for(const r of pageRuts){if(va_lhFiltered.some(x=>x.rutNorm===r)){pageRut=r;break;}}
+        if(!pageRut){
+          // Ninguno matcheó exacto — probamos si alguno está a 1 dígito de
+          // distancia de un RUT real de la nómina (típico error de OCR de un
+          // solo carácter en páginas escaneadas/aplanadas).
+          const lhRuts=va_lhFiltered.map(x=>x.rutNorm);
+          for(const r of pageRuts){
+            const cercano=va_matchRutCercano(r,lhRuts);
+            if(cercano){pageRut=cercano;break;}
+          }
+        }
         if(!pageRut&&pageRuts.size>0) pageRut=[...pageRuts][0];
         // actualizar currentRut si encontramos RUT en esta página (no solo en liquidaciones)
         if(pageRut) currentRut=pageRut;
@@ -11125,9 +11417,29 @@ async function va_validarLiquidaciones(){
         if(esContrato) w.tieneContrato = true;
         if(esCI) w.tieneCI = true;
         if(esAntec) w.tieneAntec = true;
-        if(esLicMed) w.tieneLicMed = true;
+        if(esLicMed){
+          w.tieneLicMed = true;
+          if(va_periodoMes&&va_periodoAnio){
+            const datosLic=va_extraerDatosLicencia(txt);
+            const dEnPeriodo=va_diasLicenciaEnPeriodo(datosLic.fechaInicio,datosLic.dias,va_periodoMes,va_periodoAnio);
+            if(dEnPeriodo!=null) w.diasLicEnDoc=(w.diasLicEnDoc||0)+dEnPeriodo;
+          }
+        }
         if(esRenuncia || esCartaDT || esCartaExp) w.tieneCartaDT = true;
         if(liqThumbForReview && !w.liqThumbImg) w.liqThumbImg = liqThumbForReview;
+        // Red de seguridad: página escaneada (poco texto, ni por OCR normal se detectó
+        // nada) — intentamos leer el RUN recortado con checksum antes de darla por
+        // perdida. Si el RUT validado no es el "currentRut" de esta página (pudo
+        // perderse el rastro), igual se marca tieneLicMed sobre el trabajador correcto.
+        if(!esLicMed && textoUtil<40){
+          const runTxt=await va_ocrRunLicenciaMedica(page);
+          const rutValidado=va_extraerRutConChecksum(runTxt,new Set(va_lhFiltered.map(x=>x.rutNorm)));
+          if(rutValidado){
+            if(!va_liqMap.has(rutValidado)) va_liqMap.set(rutValidado,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
+              tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false});
+            va_liqMap.get(rutValidado).tieneLicMed=true;
+          }
+        }
       }
     }catch(e){console.error('Liq error:',e);}
   }
@@ -11143,67 +11455,159 @@ async function va_validarLiquidaciones(){
 // ── 4.2 FINIQUITOS ──
 async function va_validarFiniquitos(){
   const dd=va_docsData['finiq'];if(!dd||!dd.buffers.length)return{cargado:false};
-  const ruts=new Set();const legalizados=new Set();
+  const ruts=new Set();const legalizados=new Set();const respaldados=new Set();
   for(const buf of dd.buffers){
     const txt=await va_getPdfTextOCR(buf);
     va_findAllRuts(txt).forEach(r=>va_addRut(ruts,r));
-    // Check per finiquito block if legalized (notary stamp)
+    // Cada bloque = desde un "Finiquito al contrato de trabajo" hasta el próximo,
+    // así que incluye también las páginas de respaldo (carta DT, vale vista, etc.)
+    // que vienen intercaladas justo después de cada finiquito.
     const blocks=txt.split(/Finiquito al contrato de trabajo/i);
     for(const blk of blocks){
       const bRuts=va_findAllRuts(blk);
       // Notaria: "Leyó, firmó y ratificó ante mí" o "NOTARIO PÚBLICO"
       const legalizado=/ratific[oó].{0,15}ante\s+m[ií]/i.test(blk)||/NOTARIO\s+P[UÚ]BLIC/i.test(blk)||/ley[oó].{0,10}firm.{0,10}ratific/i.test(blk);
-      if(legalizado) bRuts.forEach(r=>legalizados.add(r));
+      if(legalizado){
+        bRuts.forEach(r=>legalizados.add(r));
+      }else if(va_tieneComprobanteFiniquitoAlt(blk)){
+        bRuts.forEach(r=>respaldados.add(r));
+      }
     }
   }
   dd.rutsFound=ruts;
   const finiqLH=va_lhFiltered.filter(x=>x.termino);
   const cubiertos=finiqLH.filter(x=>ruts.has(x.rutNorm));
   const faltantes=finiqLH.filter(x=>!ruts.has(x.rutNorm));
+  // Presente pero sin notaría NI ningún comprobante alternativo aceptado
+  const sinRespaldo=finiqLH.filter(x=>ruts.has(x.rutNorm)&&!legalizados.has(x.rutNorm)&&!respaldados.has(x.rutNorm));
   const extras=[...ruts].filter(r=>!va_lhFiltered.some(x=>x.rutNorm===r&&x.termino));
   va_docResults['finiq']={nombre:'3.3 Finiquitos',cargado:true,totalLH:finiqLH.length,cubiertos:cubiertos.length,
-    faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre})),extras:extras.length,legalizados:legalizados.size,
-    estado:faltantes.length===0?'✅':(faltantes.length<=2?'⚠':'❌')};
-  return{cargado:true,ruts,legalizados};
+    faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre})),extras:extras.length,
+    legalizados:legalizados.size,respaldados:respaldados.size,
+    sinRespaldo:sinRespaldo.map(x=>({rut:x.rut,nombre:x.nombre})),
+    estado:(faltantes.length===0&&sinRespaldo.length===0)?'✅':((faltantes.length+sinRespaldo.length)<=2?'⚠':'❌')};
+  return{cargado:true,ruts,legalizados,respaldados};
 }
 
 // ── 4.2b LICENCIAS MÉDICAS ──
 async function va_validarLicenciasMedicas(){
   va_licMedRuts=new Set();
+  va_licMedDiasPorRut=new Map();
   const dd=va_docsData['licencias'];
   if(!dd||!dd.buffers||!dd.buffers.length){
     va_docResults['licencias']={nombre:'Licencias Médicas',cargado:false,estado:'—'};return;
   }
+  const lhRutSet=new Set(va_lhFiltered.map(x=>x.rutNorm));
   for(const buf of dd.buffers){
-    const txt=await va_getPdfTextOCR(buf);
-    va_findAllRuts(txt).forEach(r=>va_licMedRuts.add(r));
+    if(!ren_ocrWorker) await cargarOCR();
+    const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
+    for(let p=1;p<=pdf.numPages;p++){
+      const page=await pdf.getPage(p);
+      const tc=await page.getTextContent();
+      const txt=tc.items.map(x=>x.str).join(' ');
+      const txtLen=txt.replace(/\s/g,'').length;
+      const encontrados=va_findAllRuts(txt);
+      encontrados.forEach(r=>va_licMedRuts.add(r));
+      const rutMatchLH=[...encontrados].find(r=>lhRutSet.has(r));
+      // Red de seguridad: si la página viene escaneada (poco texto embebido) y
+      // ninguno de los RUTs encontrados coincide con la nómina, intentamos leer
+      // el RUN recortado con checksum antes de dar la página por perdida.
+      let rutFinal=rutMatchLH;
+      if(txtLen<40&&!rutMatchLH){
+        const runTxt=await va_ocrRunLicenciaMedica(page);
+        const rutValidado=va_extraerRutConChecksum(runTxt,lhRutSet);
+        if(rutValidado){va_licMedRuts.add(rutValidado);rutFinal=rutValidado;}
+      }
+      // Días que la licencia de ESTA página aportan al mes auditado
+      if(rutFinal&&va_periodoMes&&va_periodoAnio){
+        const datos=va_extraerDatosLicencia(txt);
+        const dEnPeriodo=va_diasLicenciaEnPeriodo(datos.fechaInicio,datos.dias,va_periodoMes,va_periodoAnio);
+        if(dEnPeriodo!=null){
+          // Si el trabajador tiene varias licencias en el mismo mes, se suman
+          va_licMedDiasPorRut.set(rutFinal,(va_licMedDiasPorRut.get(rutFinal)||0)+dEnPeriodo);
+        }
+      }
+    }
   }
   // Trabajadores con días de licencia en LH que necesitan justificativo
   const conLicLH=va_lhFiltered.filter(x=>x.diasLic>0&&!x.termino);
   const cubiertos=conLicLH.filter(x=>va_licMedRuts.has(x.rutNorm));
   const faltantes=conLicLH.filter(x=>!va_licMedRuts.has(x.rutNorm));
+  // Presente pero los días del documento no calzan con los que informa el LH
+  // para el mes auditado (si no pudimos leer los días del documento, no se
+  // marca como discrepancia — solo avisa cuando SÍ los leyó y no coinciden)
+  const diasNoCoinciden=cubiertos.filter(x=>{
+    const d=va_licMedDiasPorRut.get(x.rutNorm);
+    return d!=null&&d!==x.diasLic;
+  });
   va_docResults['licencias']={
     nombre:'Licencias Médicas',cargado:true,
     totalLH:conLicLH.length,cubiertos:cubiertos.length,
     faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre,diasLic:x.diasLic})),
-    estado:faltantes.length===0?'✅':(faltantes.length<=2?'⚠':'❌')
+    diasNoCoinciden:diasNoCoinciden.map(x=>({rut:x.rut,nombre:x.nombre,diasLH:x.diasLic,diasDoc:va_licMedDiasPorRut.get(x.rutNorm)})),
+    estado:(faltantes.length===0&&diasNoCoinciden.length===0)?'✅':((faltantes.length+diasNoCoinciden.length)<=2?'⚠':'❌')
   };
 }
 
 // ── 4.3 EXENCIONES ──
+// Tres niveles, del más barato al más caro — cada uno solo entra si el anterior
+// no encontró un RUT válido de la nómina en la página:
+//  1) Regex normal sobre texto embebido/OCR (como siempre)
+//  1.5) Checksum: busca un RUT con dígito verificador válido que además esté en
+//       la nómina, tolerando ruido de OCR (sin gastar IA)
+//  2) IA visual: solo si además está configurada la key — lee la página como
+//     imagen, y el nombre que devuelve se cruza por similitud contra la nómina
+//     (el nombre es mucho más confiable que el RUT en manuscrito/casillas)
 async function va_validarExenciones(){
   const dd=va_docsData['exencion'];if(!dd||!dd.buffers.length)return{cargado:false};
   const ruts=new Set();
+  const jubLH=va_lhFiltered.filter(x=>x.jubilado);
+  const jubRutSet=new Set(jubLH.map(x=>x.rutNorm));
+  const iaKeyOk=!!(document.getElementById('iav-key')&&document.getElementById('iav-key').value);
+  let paginasIA=0;
   for(const buf of dd.buffers){
-    const txt=await va_getPdfTextOCR(buf);
-    va_findAllRuts(txt).forEach(r=>va_addRut(ruts,r));
+    if(!ren_ocrWorker) await cargarOCR();
+    const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
+    for(let p=1;p<=pdf.numPages;p++){
+      const page=await pdf.getPage(p);
+      const tc=await page.getTextContent();
+      let txt=tc.items.map(x=>x.str).join(' ');
+      const textoUtil=txt.replace(/\s/g,'').length;
+      if(textoUtil<40&&ren_ocrWorker){
+        try{
+          const vp=page.getViewport({scale:2.5});
+          const canvas=document.createElement('canvas');
+          canvas.width=vp.width;canvas.height=vp.height;
+          await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+          const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
+          const {data:{text}}=await ren_ocrWorker.recognize(blob);
+          if(text&&text.replace(/\s/g,'').length>20) txt=text;
+        }catch(e){console.warn('OCR Exención pág',p,e);}
+      }
+      const encontrados=va_findAllRuts(txt);
+      let matchEnPagina=false;
+      encontrados.forEach(r=>{va_addRut(ruts,r);if(jubRutSet.has(r))matchEnPagina=true;});
+      if(matchEnPagina)continue;
+      // Nivel 1.5: checksum contra la nómina de jubilados, sin IA
+      const rutChecksum=va_extraerRutConChecksum(txt,jubRutSet);
+      if(rutChecksum){va_addRut(ruts,rutChecksum);continue;}
+      // Nivel 2: IA visual, solo si hay key configurada — la página quedó sin
+      // ningún RUT reconocible de la nómina por ninguno de los métodos gratis.
+      if(iaKeyOk){
+        paginasIA++;
+        const leido=await va_iaLeerNombreRut(page,'Este es un formulario chileno de Exención de Cotizar AFP.');
+        if(leido&&leido.nombre){
+          const match=va_matchNombreNomina(leido.nombre,jubLH);
+          if(match)va_addRut(ruts,match.rutNorm);
+        }
+      }
+    }
   }
   dd.rutsFound=ruts;
-  const jubLH=va_lhFiltered.filter(x=>x.jubilado);
   const cubiertos=jubLH.filter(x=>ruts.has(x.rutNorm));
   const faltantes=jubLH.filter(x=>!ruts.has(x.rutNorm));
   va_docResults['exencion']={nombre:'3.5 Exención Cotizar',cargado:true,totalLH:jubLH.length,cubiertos:cubiertos.length,
-    faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre})),
+    faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre})),paginasIA:paginasIA,
     estado:faltantes.length===0?'✅':(faltantes.length<=2?'⚠':'❌')};
   return{cargado:true,ruts};
 }
@@ -11419,7 +11823,14 @@ function va_clasificar(t,liq){
   if((diasLicLH>0||liq.licencias>0)&&basesConLicEnLiq.includes(va_baseKey)){
     const tieneLicEnDoc = (tieneDocLicMed && va_licMedRuts && va_licMedRuts.has(t.rutNorm)) || liq.tieneLicMed;
     if(tieneLicEnDoc){
-      r.docsOk.push('Licencia médica');
+      // Días que el documento acredita para EL MES auditado (no el total de la
+      // licencia, que puede cruzar de mes) — deben calzar con lo que informa el LH.
+      const diasDoc=liq.diasLicEnDoc!=null?liq.diasLicEnDoc:va_licMedDiasPorRut.get(t.rutNorm);
+      if(diasDoc!=null&&diasDoc!==diasLicLH){
+        r.docsOk.push(`Licencia médica (⚠ días no coinciden: LH=${diasLicLH}, doc=${diasDoc})`);
+      }else{
+        r.docsOk.push('Licencia médica');
+      }
     } else {
       r.docsReq.push('Licencia médica');
       r.docsFalt.push('Licencia médica');
@@ -12602,6 +13013,39 @@ function va_renderFiniq(){
 }
 
 function va_renderLicencias(){
+  // Lo Barnechea / Las Condes / Mejillones: la Licencia Médica va INCLUIDA dentro
+  // del PDF de Liquidaciones, no en un documento aparte — nunca hay que pedirlo
+  // acá, y el resumen sale de va_liqMap (lo que ya detectó va_validarLiquidaciones).
+  const basesConLicEnLiq=['Lo Barnechea','Las Condes','Mejillones'];
+  if(basesConLicEnLiq.includes(va_baseKey)){
+    const conLic=va_lhFiltered.filter(x=>x.diasLic>0&&!x.termino);
+    if(!conLic.length) return '<div style="color:#16613a;font-size:.82rem">✅ Ningún trabajador tiene días de licencia en el LH</div>';
+    const filas=conLic.map(x=>{
+      const w=va_liqMap.get(x.rutNorm);
+      const tiene=!!(w&&w.tieneLicMed);
+      const diasDoc=w?w.diasLicEnDoc:null;
+      let estado,obs;
+      if(!tiene){estado='❌';obs='Sin evidencia en el PDF';}
+      else if(diasDoc!=null&&diasDoc!==x.diasLic){estado='⚠';obs=`Días no coinciden (LH=${x.diasLic}, doc=${diasDoc})`;}
+      else{estado='✅';obs=diasDoc!=null?'Días coinciden':'Encontrada — no se pudo leer días del doc';}
+      return{rut:x.rut,nombre:x.nombre,diasLic:x.diasLic,estado,obs};
+    });
+    const ok=filas.filter(f=>f.estado==='✅').length;
+    const warn=filas.filter(f=>f.estado==='⚠').length;
+    const falt=filas.filter(f=>f.estado==='❌').length;
+    let h='<div style="background:#eaf6ef;border-radius:7px;padding:10px 14px;font-size:.78rem;margin-bottom:10px">ℹ En esta base la Licencia Médica va incluida dentro del PDF de Liquidaciones (no es un documento aparte).</div>';
+    h+=`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px">
+      <div class="ch-kpi ok"><div class="v">${ok}</div><div class="l">OK</div></div>
+      <div class="ch-kpi${warn?' warn':''}"><div class="v">${warn}</div><div class="l">Días no coinciden</div></div>
+      <div class="ch-kpi${falt?' err':''}"><div class="v">${falt}</div><div class="l">Sin evidencia</div></div>
+    </div>`;
+    h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Días LH</th><th>Observación</th></tr></thead><tbody>';
+    filas.sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
+      h+=`<tr><td>${f.estado}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLic}</td><td style="font-size:.72rem">${f.obs}</td></tr>`;
+    });
+    h+='</tbody></table>';
+    return h;
+  }
   const d=va_docResults['licencias'];
   if(!d) return '<div class="ch-empty"><div class="ico">🏥</div>No hay datos de licencias</div>';
   if(!d.cargado){
@@ -12625,6 +13069,12 @@ function va_renderLicencias(){
     (d.faltantes||[]).forEach(f=>{h+=`<tr><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLic||''}</td></tr>`;});
     h+='</tbody></table>';
   }else{h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los documentos de licencia están adjuntos</div>';}
+  if((d.diasNoCoinciden||[]).length>0){
+    h+='<div class="ch-section-title" style="color:#a07900">⚠ Días que no coinciden con el LH</div>';
+    h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th><th>Días LH</th><th>Días doc</th></tr></thead><tbody>';
+    d.diasNoCoinciden.forEach(f=>{h+=`<tr><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLH}</td><td style="text-align:center">${f.diasDoc}</td></tr>`;});
+    h+='</tbody></table>';
+  }
   return h;
 }
 
