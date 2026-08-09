@@ -11269,7 +11269,7 @@ async function va_validarLiquidaciones(){
         let esLiqFisica = false, esPageCI = false, esPageLibro = false;
         let esLiquidacion = false, esLiqEscaneada = false;
         let esLibro = false;
-        let libroNotasIA = null, libroNombreIA = null;
+        let libroNotasIA = null, libroNombreIA = null, licMedIA = null;
 
         if (txtLen >= 50) {
           if (tieneMarcadorLiq && !esOtroDocText) {
@@ -11313,13 +11313,17 @@ async function va_validarLiquidaciones(){
               });
               const respIA = await va_iaLeerImagen(base64IA,
                 'Esta es una página de un legajo de RRHH chileno, dentro de un lote de Liquidaciones de Sueldo. '+
-                'Decime en JSON: {"tipo":"LIBRO_ASISTENCIA","nombre_trabajador":"...","notas":"..."} donde '+
-                'LIBRO_ASISTENCIA es una foto de un cuaderno rayado con columnas de entrada/salida por día '+
-                '(puede tener escritura a mano). Si es otra cosa (cédula de identidad, contrato, certificado, '+
-                'liquidación), usá "tipo":"OTRO". "nombre_trabajador" es el nombre escrito en la cabecera de la '+
-                'página (si hay). "notas" es un resumen breve de qué marca el cuaderno para el mes completo '+
-                '(ej: "Falta día 11, Permiso días 13 y 26" — mencioná Falta/Permiso/Licencia si aparecen). '+
-                'Respondé SOLO el JSON.');
+                'Decime en JSON según el tipo de página: '+
+                'Si es una foto de un cuaderno rayado con columnas de entrada/salida por día (puede tener '+
+                'escritura a mano) → {"tipo":"LIBRO_ASISTENCIA","nombre_trabajador":"...","notas":"resumen '+
+                'breve de qué marca el cuaderno para el mes, mencionando Falta/Permiso/Licencia si aparecen"}. '+
+                'Si es un formulario de Licencia Médica (Minsal, COMPIN, Mutual, ISAPRE — con casillas de '+
+                'fecha de reposo) → {"tipo":"LICENCIA_MEDICA","nombre_trabajador":"...",'+
+                '"fecha_inicio":"DD-MM-AAAA","fecha_termino":"DD-MM-AAAA"} (las fechas del período de reposo; '+
+                'si no las ves con certeza, usá null). El documento es del año '+String(va_periodoAnio||'')+
+                ' — si la casilla de año solo trae 2 dígitos (ej. "26"), completá con ese año, no adivines otro. '+
+                'Si es otra cosa (cédula de identidad, contrato, certificado, liquidación) → {"tipo":"OTRO"}. '+
+                '"nombre_trabajador" es el nombre escrito en la página (si hay). Respondé SOLO el JSON.');
               const mIA = respIA.match(/\{[\s\S]*\}/);
               if (mIA) {
                 const parsedIA = JSON.parse(mIA[0]);
@@ -11327,6 +11331,12 @@ async function va_validarLiquidaciones(){
                   esLibro = true;
                   libroNombreIA = parsedIA.nombre_trabajador || null;
                   libroNotasIA = parsedIA.notas || null;
+                } else if (parsedIA.tipo === 'LICENCIA_MEDICA') {
+                  licMedIA = {
+                    nombre: parsedIA.nombre_trabajador || null,
+                    fechaInicio: parsedIA.fecha_inicio || null,
+                    fechaTermino: parsedIA.fecha_termino || null
+                  };
                 } else {
                   esPageCI = false; // "OTRO" — no forzamos ninguna categoría por adivinanza
                 }
@@ -11514,6 +11524,41 @@ async function va_validarLiquidaciones(){
             // Sin nombre leído (heurística vieja sin IA disponible): único
             // caso donde seguimos confiando en el rastreo de RUT de la página.
             w.tieneLibro = true;
+          }
+        }
+        if(licMedIA){
+          // Preferimos atribuir por nombre real (más confiable). Pero a
+          // diferencia del Libro, un formulario de Licencia Médica de varias
+          // páginas a veces trae el nombre en UNA sección y las fechas en
+          // OTRA (ej. COMPIN Sección A vs Sección B) — si esta página en
+          // particular no trae nombre, la única opción razonable es confiar
+          // en el rastreo de RUT de la página (currentRut), igual que para
+          // Contrato/CI/Antecedentes.
+          let wLic=null;
+          if(licMedIA.nombre){
+            const matchLic=va_matchNombreNomina(licMedIA.nombre,va_lhFiltered);
+            if(matchLic){
+              const rutLic=matchLic.rutNorm;
+              if(!va_liqMap.has(rutLic)) va_liqMap.set(rutLic,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
+                tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false});
+              wLic=va_liqMap.get(rutLic);
+            }
+          } else {
+            wLic=w;
+          }
+          if(wLic){
+            wLic.tieneLicMed=true;
+            const mIni=(licMedIA.fechaInicio||'').match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
+            const mFin=(licMedIA.fechaTermino||'').match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
+            if(mIni&&mFin&&va_periodoMes&&va_periodoAnio){
+              const dIniIA=new Date(parseInt(mIni[3],10),parseInt(mIni[2],10)-1,parseInt(mIni[1],10));
+              const dFinIA=new Date(parseInt(mFin[3],10),parseInt(mFin[2],10)-1,parseInt(mFin[1],10));
+              if(!isNaN(dIniIA.getTime())&&!isNaN(dFinIA.getTime())&&dFinIA>=dIniIA){
+                const diasIA=Math.round((dFinIA-dIniIA)/(1000*60*60*24))+1;
+                const dEnPeriodoIA=va_diasLicenciaEnPeriodo(dIniIA,diasIA,va_periodoMes,va_periodoAnio);
+                if(dEnPeriodoIA!=null) wLic.diasLicEnDoc=(wLic.diasLicEnDoc||0)+dEnPeriodoIA;
+              }
+            }
           }
         }
         if(esContrato) w.tieneContrato = true;
