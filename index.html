@@ -10892,18 +10892,27 @@ function va_distanciaLevenshtein(a,b){
 function va_matchNombreNomina(nombreLeido,listaLH){
   const norm=va_normalizarNombre(nombreLeido);
   if(!norm||!listaLH||!listaLH.length)return null;
-  let mejor=null,mejorDist=Infinity,segundoDist=Infinity;
+  let mejor=null,mejorScore=Infinity,segundoScore=Infinity,mejorEsPrefijo=false;
   for(const t of listaLH){
     const nombreLH=va_normalizarNombre(t.nombre);
     if(!nombreLH)continue;
+    // Caso muy común: la IA/OCR lee el nombre incompleto (ej. sin el segundo
+    // nombre o el segundo apellido — "Abarca Lopez Juan" en vez de "Abarca
+    // Lopez Juan Alberto"). Eso da una distancia de edición grande aunque sea
+    // exactamente correcto, así que si uno es prefijo del otro lo tratamos
+    // como coincidencia segura (score 0), sin pasar por el umbral de distancia.
+    const esPrefijo=nombreLH.startsWith(norm)||norm.startsWith(nombreLH);
     const dist=va_distanciaLevenshtein(norm,nombreLH);
-    if(dist<mejorDist){segundoDist=mejorDist;mejorDist=dist;mejor=t;}
-    else if(dist<segundoDist){segundoDist=dist;}
+    const score=esPrefijo?0:dist;
+    if(score<mejorScore){segundoScore=mejorScore;mejorScore=score;mejor=t;mejorEsPrefijo=esPrefijo;}
+    else if(score<segundoScore){segundoScore=score;}
   }
   if(!mejor)return null;
-  const umbral=Math.max(2,Math.round(mejor.nombre.length*0.25));
-  if(mejorDist>umbral)return null;
-  if(segundoDist-mejorDist<2)return null;
+  if(!mejorEsPrefijo){
+    const umbral=Math.max(2,Math.round(mejor.nombre.length*0.25));
+    if(mejorScore>umbral)return null;
+  }
+  if(segundoScore-mejorScore<2)return null;
   return mejor;
 }
 
