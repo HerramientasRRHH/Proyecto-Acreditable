@@ -11337,8 +11337,13 @@ async function va_validarLiquidaciones(){
                 'breve de qué marca el cuaderno para el mes, mencionando Falta/Permiso/Licencia si aparecen"}. '+
                 'Si es un formulario de Licencia Médica (Minsal, COMPIN, Mutual, ISAPRE — con casillas de '+
                 'fecha de reposo) → {"tipo":"LICENCIA_MEDICA","nombre_trabajador":"...",'+
-                '"fecha_inicio":"DD-MM-AAAA","fecha_termino":"DD-MM-AAAA"} (las fechas del período de reposo; '+
-                'si no las ves con certeza, usá null). El documento es del año '+String(va_periodoAnio||'')+
+                '"fecha_inicio":"DD-MM-AAAA","fecha_termino":"DD-MM-AAAA","numero_dias":N} (las fechas del '+
+                'período de reposo; si no las ves con certeza, usá null). "numero_dias" es el número de días '+
+                'de reposo tal como aparece impreso en el formulario (casillas "N° DE DÍAS", "N DE DIAS" o '+
+                'similar, a veces con el número también escrito en palabras al lado) — leelo directo de esa '+
+                'casilla aunque esta página en particular no muestre la fecha de término (formularios COMPIN '+
+                'a veces separan fecha inicio y fecha término en secciones/páginas distintas del mismo '+
+                'formulario); si no ves esa casilla, usá null. El documento es del año '+String(va_periodoAnio||'')+
                 ' — si la casilla de año solo trae 2 dígitos (ej. "26"), completá con ese año, no adivines otro. '+
                 'Si es otra cosa (cédula de identidad, contrato, certificado, liquidación) → {"tipo":"OTRO"}. '+
                 '"nombre_trabajador" es el nombre escrito en la página (si hay). Respondé SOLO el JSON.');
@@ -11353,7 +11358,8 @@ async function va_validarLiquidaciones(){
                   licMedIA = {
                     nombre: parsedIA.nombre_trabajador || null,
                     fechaInicio: parsedIA.fecha_inicio || null,
-                    fechaTermino: parsedIA.fecha_termino || null
+                    fechaTermino: parsedIA.fecha_termino || null,
+                    numeroDias: Number.isFinite(parsedIA.numero_dias) ? parsedIA.numero_dias : null
                   };
                 } else {
                   esPageCI = false; // "OTRO" — no forzamos ninguna categoría por adivinanza
@@ -11412,7 +11418,11 @@ async function va_validarLiquidaciones(){
 
         // ── FIRMA FÍSICA: solo en páginas de LIQUIDACIÓN (no libros, no licencias) ──
         // Zona: y=60%-82% del alto, x=5%-65% del ancho
-        // Threshold: dark_ratio ≥ 1.2% indica firma manuscrita (vs 0.3% zona vacía)
+        // Threshold bajo a propósito: preferimos marcar firmado ante cualquier
+        // mancha/trazo visible (falso positivo) y que la persona lo revise y
+        // corrija a mano si no es una firma real, antes que perdernos una
+        // firma real por ser demasiado estrictos (falso negativo, que obliga
+        // a revisar TODO manualmente igual). Pedido explícito del usuario.
         let esFirmaFisica=false;
         let firmaFisicaImgData=null;
         if(esLiquidacion&&esLiqEscaneada&&canvas&&ctx){
@@ -11427,8 +11437,10 @@ async function va_validarLiquidaciones(){
               if(gray<200)darkPx++;
             }
             const darkRatio=darkPx/(fZone.data.length/4);
-            // ≥1.2% tinta → firma presente; <1.2% → solo línea + texto FIRMA CONFORME
-            if(darkRatio>=0.012&&darkRatio<0.30){
+            // ≥0.3% tinta → cualquier mancha/trazo visible cuenta como firma;
+            // <0.3% → zona realmente vacía. Tope alto (85%) solo para descartar
+            // páginas completamente oscuras/corruptas, no firmas reales.
+            if(darkRatio>=0.003&&darkRatio<0.85){
               esFirmaFisica=true;
               // Capturar thumbnail de la zona firma
               const thumbW=fx1, thumbH=fy1-fy0;
@@ -11572,13 +11584,35 @@ async function va_validarLiquidaciones(){
             wLic.tieneLicMed=true;
             const mIni=(licMedIA.fechaInicio||'').match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
             const mFin=(licMedIA.fechaTermino||'').match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
-            if(mIni&&mFin&&va_periodoMes&&va_periodoAnio){
+            if(va_periodoMes&&va_periodoAnio&&mIni){
               const dIniIA=new Date(parseInt(mIni[3],10),parseInt(mIni[2],10)-1,parseInt(mIni[1],10));
-              const dFinIA=new Date(parseInt(mFin[3],10),parseInt(mFin[2],10)-1,parseInt(mFin[1],10));
-              if(!isNaN(dIniIA.getTime())&&!isNaN(dFinIA.getTime())&&dFinIA>=dIniIA){
-                const diasIA=Math.round((dFinIA-dIniIA)/(1000*60*60*24))+1;
-                const dEnPeriodoIA=va_diasLicenciaEnPeriodo(dIniIA,diasIA,va_periodoMes,va_periodoAnio);
-                if(dEnPeriodoIA!=null) wLic.diasLicEnDoc=(wLic.diasLicEnDoc||0)+dEnPeriodoIA;
+              let diasIA=null;
+              if(mFin){
+                // Tenemos ambas fechas (formato Minsal/Mutual/Comprobante Electrónico
+                // de una sola página, o COMPIN cuando la IA logró leer ambas casillas).
+                const dFinIA=new Date(parseInt(mFin[3],10),parseInt(mFin[2],10)-1,parseInt(mFin[1],10));
+                if(!isNaN(dIniIA.getTime())&&!isNaN(dFinIA.getTime())&&dFinIA>=dIniIA){
+                  diasIA=Math.round((dFinIA-dIniIA)/(1000*60*60*24))+1;
+                }
+              } else if(licMedIA.numeroDias!=null&&licMedIA.numeroDias>0){
+                // Formulario COMPIN: la fecha de término suele estar en OTRA página
+                // (Sección B), pero la casilla "N° DE DÍAS" con el total ya viene en
+                // esta misma página — usarla directo en vez de perder los días porque
+                // esta página puntual no trae la fecha de término.
+                diasIA=licMedIA.numeroDias;
+              }
+              if(diasIA!=null&&!isNaN(dIniIA.getTime())){
+                // Un mismo formulario COMPIN de varias páginas puede hacer que la IA
+                // lea la MISMA licencia dos veces (ej. Sección A con numero_dias y
+                // Sección B con fecha_termino) — deduplicar por fecha de inicio para
+                // no sumar los mismos días dos veces.
+                const claveDedup=dIniIA.getTime();
+                if(!wLic._licIniciosContados) wLic._licIniciosContados=new Set();
+                if(!wLic._licIniciosContados.has(claveDedup)){
+                  wLic._licIniciosContados.add(claveDedup);
+                  const dEnPeriodoIA=va_diasLicenciaEnPeriodo(dIniIA,diasIA,va_periodoMes,va_periodoAnio);
+                  if(dEnPeriodoIA!=null) wLic.diasLicEnDoc=(wLic.diasLicEnDoc||0)+dEnPeriodoIA;
+                }
               }
             }
           }
