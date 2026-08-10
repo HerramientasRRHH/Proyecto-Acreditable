@@ -11167,16 +11167,13 @@ async function va_validarLiquidaciones(){
   // imagen) donde antes se adivinaba el tipo por la proporción de la página —
   // ahí es donde se confundía una foto del Libro de Asistencia con una Cédula.
   const iaLibroKeyOk=!!(document.getElementById('iav-key')&&document.getElementById('iav-key').value);
-  // Límite duro de páginas mandadas a IA por corrida — protección contra gasto
-  // descontrolado de tokens (ej. si algo queda mal clasificado como "ambiguo"
-  // en masa). Al llegar al tope, el resto vuelve a la heurística vieja.
-  // Un valor fijo bajo (30) se quedaba corto en bases grandes: cada trabajador
-  // puede necesitar 1 página de Libro + hasta 2-3 de Licencia Médica vía IA,
-  // así que con 81 trabajadores el tope viejo alcanzaba para ~15-20 personas
-  // y el resto quedaba sin verificar aunque la IA funcionara bien (bug real
-  // reportado: "27 trabajadores, casi todos con Libro faltante"). Ahora
-  // escala con el tamaño real de la nómina de esta base/sector.
-  const IA_LIBRO_MAX_PAGINAS=window.VA_IA_LIBRO_MAX||Math.max(30,(va_lhFiltered?.length||0)*5);
+  // Sin tope fijo: un límite fijo (antes 30, después escalado por nómina)
+  // seguía quedando corto en bases grandes de verdad (300 trabajadores) y
+  // dejaba gente sin verificar aunque la IA funcionara bien — pedido
+  // explícito del usuario, prefiere pagar por la cobertura real a perder
+  // fidelidad. window.VA_IA_LIBRO_MAX sigue disponible como tope manual
+  // opcional si alguna vez se necesita acotar una corrida puntual.
+  const IA_LIBRO_MAX_PAGINAS=window.VA_IA_LIBRO_MAX||Infinity;
   let iaLibroPaginasUsadas=0;
   for(const buf of dd.buffers){
     try{
@@ -11296,6 +11293,7 @@ async function va_validarLiquidaciones(){
         let esLiquidacion = false, esLiqEscaneada = false;
         let esLibro = false;
         let libroNotasIA = null, libroNombreIA = null, licMedIA = null;
+        let libroFaltasIA = null, libroPermisosIA = null, libroLicDiasIA = null;
 
         if (txtLen >= 50) {
           if (tieneMarcadorLiq && !esOtroDocText) {
@@ -11351,7 +11349,12 @@ async function va_validarLiquidaciones(){
                 'Decime en JSON según el tipo de página: '+
                 'Si es una foto de un cuaderno rayado con columnas de entrada/salida por día (puede tener '+
                 'escritura a mano) → {"tipo":"LIBRO_ASISTENCIA","nombre_trabajador":"...","notas":"resumen '+
-                'breve de qué marca el cuaderno para el mes, mencionando Falta/Permiso/Licencia si aparecen"}. '+
+                'breve de qué marca el cuaderno para el mes, mencionando Falta/Permiso/Licencia si aparecen",'+
+                '"faltas":N,"permisos":N,"licencias_dias":N} donde faltas/permisos/licencias_dias son la '+
+                'CANTIDAD DE DÍAS del mes marcados en el cuaderno como "Falta"/"F", "Permiso"/"P" y '+
+                '"Licencia"/"L" respectivamente (contá cada día marcado, no las veces que aparece la palabra '+
+                'escrita una sola vez para varios días seguidos — si dice "Licencia" y abajo varios días '+
+                'marcados solo con "L", contalos todos). Si no hay ninguna marca de un tipo, usá 0. '+
                 'Si es un formulario de Licencia Médica (Minsal, COMPIN, Mutual, ISAPRE — con casillas de '+
                 'fecha de reposo) → {"tipo":"LICENCIA_MEDICA","nombre_trabajador":"...",'+
                 '"fecha_inicio":"DD-MM-AAAA","fecha_termino":"DD-MM-AAAA","numero_dias":N} (las fechas del '+
@@ -11371,6 +11374,9 @@ async function va_validarLiquidaciones(){
                   esLibro = true;
                   libroNombreIA = parsedIA.nombre_trabajador || null;
                   libroNotasIA = parsedIA.notas || null;
+                  libroFaltasIA = Number.isFinite(parsedIA.faltas) ? parsedIA.faltas : null;
+                  libroPermisosIA = Number.isFinite(parsedIA.permisos) ? parsedIA.permisos : null;
+                  libroLicDiasIA = Number.isFinite(parsedIA.licencias_dias) ? parsedIA.licencias_dias : null;
                 } else if (parsedIA.tipo === 'LICENCIA_MEDICA') {
                   licMedIA = {
                     nombre: parsedIA.nombre_trabajador || null,
@@ -11570,6 +11576,11 @@ async function va_validarLiquidaciones(){
               wLibro.tieneLibro=true;
               if(libroNotasIA) wLibro.libroNotasIA=((wLibro.libroNotasIA?wLibro.libroNotasIA+' | ':'')+libroNotasIA);
               if(!wLibro.libroNombreIA) wLibro.libroNombreIA=libroNombreIA;
+              // Acumular por si el Libro de este trabajador viene en más de
+              // una página/foto (ej. dos meses en el mismo cuaderno visibles).
+              if(libroFaltasIA!=null) wLibro.libroFaltasIA=(wLibro.libroFaltasIA||0)+libroFaltasIA;
+              if(libroPermisosIA!=null) wLibro.libroPermisosIA=(wLibro.libroPermisosIA||0)+libroPermisosIA;
+              if(libroLicDiasIA!=null) wLibro.libroLicDiasIA=(wLibro.libroLicDiasIA||0)+libroLicDiasIA;
             }
           } else {
             // Sin nombre leído (heurística vieja sin IA disponible): único
@@ -13035,10 +13046,13 @@ function va_renderResultados(){
     <div class="ch-kpi${finiq?' warn':''}"><div class="v">${finiq}</div><div class="l">📋 Finiq</div></div>`;
   // Sub-tabs: one per document type
   const baseTabs=['liq','finiq','licencias','exencion','f30','f301','previred'];
+  const basesConLicEnLiqTabs=['Lo Barnechea','Las Condes','Mejillones'];
+  if(basesConLicEnLiqTabs.includes(va_baseKey)){baseTabs.push('libro');}
   if(va_baseKey==='Antofagasta'){baseTabs.push('imput','jubilados','anexos','cartanofirma','librorem','libroasist','mujeres','discapacidad');}
   if(va_baseKey==='Vitacura'){baseTabs.push('contratos','nominas','epp','libroasist','subcontrato');}
   const tabs=baseTabs;
   const tabLabels={liq:'📄 Liquidaciones',finiq:'📑 Finiquitos',licencias:'🏥 Lic. Médicas',exencion:'👴 Exenciones',f30:'📋 F30',f301:'📋 F30-1',previred:'💰 PreviRed',
+    libro:'📅 Libro Asistencia',
     imput:'📊 IMPUT',jubilados:'👴 Jubilados',anexos:'🔁 Reemplazos',cartanofirma:'✉ Carta NoFirma',
     librorem:'📘 Libro Rem.',libroasist:'📅 Libro Asist.',mujeres:'👩 Mujeres',discapacidad:'♿ Discapacidad',
     nominas:'📊 Nóminas',epp:'🦺 EPP',subcontrato:'🏢 O · Subcontrato',contratos:'📝 Contratos'};
@@ -13056,6 +13070,7 @@ function va_subtab(tab){
   else if(tab==='finiq') c.innerHTML=va_renderFiniq();
   else if(tab==='exencion') c.innerHTML=va_renderExencion();
   else if(tab==='licencias') c.innerHTML=va_renderLicencias();
+  else if(tab==='libro') c.innerHTML=va_renderLibroDetalle();
   else if(tab==='f30') c.innerHTML=va_renderF30();
   else if(tab==='imput') c.innerHTML=va_renderImput();
   else if(['jubilados','librorem','libroasist','mujeres','discapacidad'].includes(tab)&&va_baseKey!=='Vitacura') c.innerHTML=va_renderAntTab(tab);
@@ -13257,6 +13272,64 @@ function va_renderFiniq(){
     });
     h+='</tbody></table>';
   }
+  return h;
+}
+
+// ── Detalle por trabajador del Libro de Asistencia (leído por IA) ──
+// Cruza lo que la IA leyó en cada foto del cuaderno (faltas/permisos/días de
+// licencia marcados) contra lo que dice la propia liquidación del trabajador
+// (que refleja el Libro de Haberes): si el LH dice 1 inasistencia, el Libro
+// debería mostrar 1 Falta marcada; si dice permiso, el Libro debería marcar
+// Permiso; etc. Cuando no coincide, se flagea para revisión manual.
+function va_renderLibroDetalle(){
+  if(!va_liqMap.size) return '<div class="ch-empty"><div class="ico">📅</div>Sin resultados — corré la validación primero</div>';
+  const filas=va_lhFiltered.filter(x=>!x.termino).map(x=>{
+    const w=va_liqMap.get(x.rutNorm);
+    const tiene=!!(w&&w.tieneLibro);
+    if(!tiene){
+      return{rut:x.rut,nombre:x.nombre,estado:'faltante',icono:'❌',
+        lh:{faltas:w?w.inasistencias:0,permisos:w?w.permisos:0,licencias:w?w.licencias:0},
+        libro:{faltas:null,permisos:null,licencias:null},notas:'',obs:'Libro no encontrado / no atribuido con IA'};
+    }
+    const lhFaltas=w.inasistencias||0, lhPermisos=w.permisos||0, lhLicencias=w.licencias||0;
+    const libFaltas=w.libroFaltasIA, libPermisos=w.libroPermisosIA, libLicencias=w.libroLicDiasIA;
+    const huboLecturaIA=(libFaltas!=null||libPermisos!=null||libLicencias!=null);
+    const mismatches=[];
+    if(huboLecturaIA){
+      if(libFaltas!=null&&libFaltas!==lhFaltas)mismatches.push(`Faltas LH=${lhFaltas} vs Libro=${libFaltas}`);
+      if(libPermisos!=null&&libPermisos!==lhPermisos)mismatches.push(`Permisos LH=${lhPermisos} vs Libro=${libPermisos}`);
+      if(libLicencias!=null&&libLicencias!==lhLicencias)mismatches.push(`Licencia LH=${lhLicencias} vs Libro=${libLicencias}`);
+    }
+    let estado,icono,obs;
+    if(!huboLecturaIA){estado='sinlectura';icono='⚠';obs='Libro encontrado, pero sin conteo de IA (clasificado sin IA disponible)';}
+    else if(mismatches.length){estado='discrepancia';icono='⚠';obs=mismatches.join(' · ');}
+    else{estado='ok';icono='✅';obs='Coincide con LH';}
+    return{rut:x.rut,nombre:x.nombre,estado,icono,
+      lh:{faltas:lhFaltas,permisos:lhPermisos,licencias:lhLicencias},
+      libro:{faltas:libFaltas,permisos:libPermisos,licencias:libLicencias},
+      notas:w.libroNotasIA||'',obs};
+  });
+  const ok=filas.filter(f=>f.estado==='ok').length;
+  const disc=filas.filter(f=>f.estado==='discrepancia').length;
+  const sinLect=filas.filter(f=>f.estado==='sinlectura').length;
+  const falt=filas.filter(f=>f.estado==='faltante').length;
+  let h='<div style="background:#eaf6ef;border-radius:7px;padding:10px 14px;font-size:.78rem;margin-bottom:10px">ℹ Cruza lo que la IA lee en cada foto del Libro (Faltas/Permisos/días de Licencia marcados) contra lo que informa la liquidación del trabajador (que refleja el Libro de Haberes).</div>';
+  h+=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">
+    <div class="ch-kpi ok"><div class="v">${ok}</div><div class="l">✅ Coincide</div></div>
+    <div class="ch-kpi${disc?' warn':''}"><div class="v">${disc}</div><div class="l">⚠ Discrepancia</div></div>
+    <div class="ch-kpi${sinLect?' warn':''}"><div class="v">${sinLect}</div><div class="l">⚠ Sin conteo IA</div></div>
+    <div class="ch-kpi${falt?' err':''}"><div class="v">${falt}</div><div class="l">❌ Libro faltante</div></div>
+  </div>`;
+  h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Faltas LH/Libro</th><th>Permisos LH/Libro</th><th>Licencia LH/Libro</th><th>Observación</th></tr></thead><tbody>';
+  const fmt=v=>v==null?'—':v;
+  [...filas].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
+    h+=`<tr><td>${f.icono}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td>`+
+      `<td style="text-align:center">${f.lh.faltas}/${fmt(f.libro.faltas)}</td>`+
+      `<td style="text-align:center">${f.lh.permisos}/${fmt(f.libro.permisos)}</td>`+
+      `<td style="text-align:center">${f.lh.licencias}/${fmt(f.libro.licencias)}</td>`+
+      `<td style="font-size:.7rem">${f.obs}</td></tr>`;
+  });
+  h+='</tbody></table>';
   return h;
 }
 
