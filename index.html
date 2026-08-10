@@ -10812,6 +10812,17 @@ function va_tieneComprobanteFiniquitoAlt(txt){
   const esRenunciaDT=/RENUNCIA\s+VOLUNTARIA/i.test(txt)&&/DIRECCI[OÓ]N\s+DEL\s+TRABAJO/i.test(txt);
   return esValeVista||esCartaAvisoDT||esCartaEmpresa||esCorreoCertificado||esCartaJudicial||esRenunciaDT;
 }
+// Igual que va_tieneComprobanteFiniquitoAlt pero devuelve QUÉ tipo de respaldo
+// encontró (para mostrar el detalle por trabajador), en vez de solo sí/no.
+function va_tipoComprobanteFiniquitoAlt(txt){
+  if(/VALE\s*VISTA/i.test(txt))return'Vale Vista';
+  if(/COMPROBANTE\s+DE\s+CARTA\s+DE\s+AVISO/i.test(txt)&&/DIRECCI[OÓ]N\s+DEL\s+TRABAJO/i.test(txt))return'Carta de aviso DT';
+  if(/comunica\s+t[eé]rmino\s+de\s+contrato/i.test(txt)||(/aviso/i.test(txt)&&/t[eé]rmino\s+de(l)?\s+contrato/i.test(txt)&&/Ref\.?\s*:/i.test(txt)))return'Carta empresa';
+  if(/CORREOS\s+CHILE/i.test(txt)||/FORMULARIO\s+ADMISI[OÓ]N\s+ENV[IÍ]OS\s+REGISTRAD/i.test(txt)||/CARTA\s+CERTIFICADA/i.test(txt))return'Correo certificado';
+  if(/CARTA\s+JUDICIAL/i.test(txt)||(/JUZGADO|TRIBUNAL/i.test(txt)&&/notificaci[oó]n/i.test(txt)))return'Carta judicial';
+  if(/RENUNCIA\s+VOLUNTARIA/i.test(txt)&&/DIRECCI[OÓ]N\s+DEL\s+TRABAJO/i.test(txt))return'Renuncia ante DT';
+  return null;
+}
 
 // ── RUT a 1 solo caracter de distancia de la nómina (típico: un dígito mal
 // leído por OCR, ej. "7.172.575-k" en vez de "7.772.575-k") ──
@@ -11159,7 +11170,13 @@ async function va_validarLiquidaciones(){
   // Límite duro de páginas mandadas a IA por corrida — protección contra gasto
   // descontrolado de tokens (ej. si algo queda mal clasificado como "ambiguo"
   // en masa). Al llegar al tope, el resto vuelve a la heurística vieja.
-  const IA_LIBRO_MAX_PAGINAS=window.VA_IA_LIBRO_MAX||30;
+  // Un valor fijo bajo (30) se quedaba corto en bases grandes: cada trabajador
+  // puede necesitar 1 página de Libro + hasta 2-3 de Licencia Médica vía IA,
+  // así que con 81 trabajadores el tope viejo alcanzaba para ~15-20 personas
+  // y el resto quedaba sin verificar aunque la IA funcionara bien (bug real
+  // reportado: "27 trabajadores, casi todos con Libro faltante"). Ahora
+  // escala con el tamaño real de la nómina de esta base/sector.
+  const IA_LIBRO_MAX_PAGINAS=window.VA_IA_LIBRO_MAX||Math.max(30,(va_lhFiltered?.length||0)*5);
   let iaLibroPaginasUsadas=0;
   for(const buf of dd.buffers){
     try{
@@ -11666,6 +11683,7 @@ async function va_validarLiquidaciones(){
 async function va_validarFiniquitos(){
   const dd=va_docsData['finiq'];if(!dd||!dd.buffers.length)return{cargado:false};
   const ruts=new Set();const legalizados=new Set();const respaldados=new Set();
+  const tipoPorRut=new Map(); // rutNorm -> 'Vale Vista' | 'Carta empresa' | ... (para el detalle)
   for(const buf of dd.buffers){
     const txt=await va_getPdfTextOCR(buf);
     va_findAllRuts(txt).forEach(r=>va_addRut(ruts,r));
@@ -11679,8 +11697,9 @@ async function va_validarFiniquitos(){
       const legalizado=/ratific[oó].{0,15}ante\s+m[ií]/i.test(blk)||/NOTARIO\s+P[UÚ]BLIC/i.test(blk)||/ley[oó].{0,10}firm.{0,10}ratific/i.test(blk);
       if(legalizado){
         bRuts.forEach(r=>legalizados.add(r));
-      }else if(va_tieneComprobanteFiniquitoAlt(blk)){
-        bRuts.forEach(r=>respaldados.add(r));
+      }else{
+        const tipo=va_tipoComprobanteFiniquitoAlt(blk);
+        if(tipo){bRuts.forEach(r=>{respaldados.add(r);if(!tipoPorRut.has(r))tipoPorRut.set(r,tipo);});}
       }
     }
   }
@@ -11691,10 +11710,20 @@ async function va_validarFiniquitos(){
   // Presente pero sin notaría NI ningún comprobante alternativo aceptado
   const sinRespaldo=finiqLH.filter(x=>ruts.has(x.rutNorm)&&!legalizados.has(x.rutNorm)&&!respaldados.has(x.rutNorm));
   const extras=[...ruts].filter(r=>!va_lhFiltered.some(x=>x.rutNorm===r&&x.termino));
+  // Detalle por trabajador (para la tabla completa: notariado / tipo de respaldo / sin nada)
+  const detalle=finiqLH.map(x=>{
+    let estado,detalleTxt;
+    if(!ruts.has(x.rutNorm)){estado='faltante';detalleTxt='Sin finiquito en el PDF';}
+    else if(legalizados.has(x.rutNorm)){estado='legalizado';detalleTxt='Notariado (ratificado ante notario)';}
+    else if(respaldados.has(x.rutNorm)){estado='respaldo';detalleTxt=tipoPorRut.get(x.rutNorm)||'Con respaldo alternativo';}
+    else{estado='sinrespaldo';detalleTxt='Sin notaría ni respaldo alternativo detectado';}
+    return{rut:x.rut,nombre:x.nombre,estado,detalle:detalleTxt};
+  });
   va_docResults['finiq']={nombre:'3.3 Finiquitos',cargado:true,totalLH:finiqLH.length,cubiertos:cubiertos.length,
     faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre})),extras:extras.length,
     legalizados:legalizados.size,respaldados:respaldados.size,
     sinRespaldo:sinRespaldo.map(x=>({rut:x.rut,nombre:x.nombre})),
+    detalle,
     estado:(faltantes.length===0&&sinRespaldo.length===0)?'✅':((faltantes.length+sinRespaldo.length)<=2?'⚠':'❌')};
   return{cargado:true,ruts,legalizados,respaldados};
 }
@@ -13219,6 +13248,15 @@ function va_renderFiniq(){
     [...d.faltantes].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{h+=`<tr><td>${f.rut}</td><td>${f.nombre}</td></tr>`;});
     h+='</tbody></table>';
   }else{h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los finiquitados del LH están en el PDF</div>';}
+  if(d.detalle&&d.detalle.length){
+    const iconos={legalizado:'✅',respaldo:'✅',sinrespaldo:'⚠',faltante:'❌'};
+    h+='<div class="ch-section-title" style="margin-top:16px">📋 Detalle por trabajador — notariado / tipo de respaldo</div>';
+    h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Detalle</th></tr></thead><tbody>';
+    [...d.detalle].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
+      h+=`<tr><td>${iconos[f.estado]||''}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="font-size:.72rem">${f.detalle}</td></tr>`;
+    });
+    h+='</tbody></table>';
+  }
   return h;
 }
 
