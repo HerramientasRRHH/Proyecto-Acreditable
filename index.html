@@ -10614,6 +10614,7 @@ const VA_BASES={
 let va_lhAll=[],va_lhFiltered=[],va_baseKey=null,va_sectorKey=null,va_subarea=null,va_licMedRuts=new Set();
 let va_licMedDiasPorRut=new Map(); // rutNorm -> días de licencia que caen en el mes auditado, según el documento
 let va_docsData={},va_liqMap=new Map(),va_resultados=[],va_docResults={},va_subtabActiva='liq';
+let va_iaDiag=null; // {configurada,paginasOk,paginasError} — diagnóstico de conexión IA, no "uso de tokens"
 let va_periodoMes=null,va_periodoAnio=null; // Fix 1: periodo extraído del LH
 
 // ── HELPERS ──
@@ -11175,6 +11176,7 @@ async function va_validarLiquidaciones(){
   // opcional si alguna vez se necesita acotar una corrida puntual.
   const IA_LIBRO_MAX_PAGINAS=window.VA_IA_LIBRO_MAX||Infinity;
   let iaLibroPaginasUsadas=0;
+  let iaLibroErrores=0;
   for(const buf of dd.buffers){
     try{
       const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
@@ -11389,7 +11391,7 @@ async function va_validarLiquidaciones(){
                 }
                 iaResuelto = true;
               }
-            } catch (eIA) { console.warn('IA clasificación de página falló:', eIA); }
+            } catch (eIA) { console.warn('IA clasificación de página falló:', eIA); iaLibroErrores++; }
           }
           if (!iaResuelto && !yaClasificada) {
             // Sin IA disponible: heurística vieja (menos confiable, se sabe que
@@ -11683,11 +11685,13 @@ async function va_validarLiquidaciones(){
   // correctamente sin necesitar IA. Propagar a todos por encima de eso solo
   // producía falsos positivos (bug real reportado por el usuario: "dice que
   // el libro está y no es así"). Se eliminó.
-  // Nota interna (solo consola del navegador, no visible en la app) de cuántas
-  // páginas usaron IA en esta corrida — útil para debug, no para el usuario.
-  if(iaLibroKeyOk){
-    console.log('[Libro IA] páginas usadas:', iaLibroPaginasUsadas, '/', IA_LIBRO_MAX_PAGINAS);
-  }
+  // Diagnóstico de conexión IA — NO es "uso de tokens" (no se muestra costo
+  // ni cantidad para presumir gasto), es solo un chequeo de que la conexión
+  // esté funcionando: configurada o no, cuántas páginas respondieron bien
+  // vs. cuántas fallaron por error de red/formato. Se guarda para mostrarlo
+  // en un cuadro pequeño y discreto en la pestaña de Liquidaciones.
+  va_iaDiag={configurada:iaLibroKeyOk,paginasOk:iaLibroPaginasUsadas-iaLibroErrores,paginasError:iaLibroErrores};
+  console.log('[Libro IA] configurada:',iaLibroKeyOk,'| páginas ok:',va_iaDiag.paginasOk,'| errores:',iaLibroErrores);
 }
 
 // ── 4.2 FINIQUITOS ──
@@ -13095,6 +13099,11 @@ function va_renderLiq(){
     <strong>${va_liqMap.size}</strong> liquidaciones detectadas en PDF — <strong>${va_lhFiltered.filter(x=>!x.termino).length}</strong> esperadas en LH (activos + 0 días)
     · <span style="color:#888">ordenado alfabéticamente</span>
   </div>`;
+  if(va_iaDiag){
+    h += va_iaDiag.configurada
+      ? `<div style="background:#f2f7ff;border:1px solid #cfe0f5;border-radius:7px;padding:6px 12px;margin-bottom:10px;font-size:.72rem;color:#375;display:inline-block">🔧 Diagnóstico IA: conectada · ${va_iaDiag.paginasOk} página(s) leídas ok${va_iaDiag.paginasError?` · <span style="color:#c0392b">${va_iaDiag.paginasError} con error de conexión</span>`:''}</div><br>`
+      : `<div style="background:#fff3cd;border:1px solid #f0d060;border-radius:7px;padding:6px 12px;margin-bottom:10px;font-size:.72rem;color:#7a5a00;display:inline-block">🔧 Diagnóstico IA: <strong>no configurada</strong> en este navegador (⚙ Configuración del motor IA) — el Libro/Licencias de páginas ambiguas no se están verificando con IA en esta corrida.</div><br>`;
+  }
   if(menos30list.length&&['Lo Barnechea','Las Condes','Mejillones'].includes(va_baseKey)){
     h += `<div style="background:#fffbea;border:1px solid #f0d060;border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:.76rem">
       <strong>📅 ${menos30list.length} trabajadores con menos de 30 días</strong>:<br>
