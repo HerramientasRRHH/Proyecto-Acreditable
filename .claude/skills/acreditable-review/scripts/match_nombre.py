@@ -23,7 +23,8 @@ import unicodedata
 
 import openpyxl
 
-STOP = {"SR", "SRA", "DON", "DONA", "SENOR", "SENORA", "DE", "LA", "EL"}
+STOP = {"SR", "SRA", "DON", "DONA", "SENOR", "SENORA", "DE", "LA", "EL",
+        "MES", "DIA", "DIAS", "ANO", "ANIO", "TOTAL", "HORAS", "NOTA"}
 
 
 def norm(s):

@@ -10578,7 +10578,7 @@ const VA_BASES={
       {id:'liq',label:'H · Liquidaciones',icon:'📄',accept:'.pdf',multi:true,tip:'PDF unificado o varios'},
       {id:'cartanofirma',label:'Carta No Firma',icon:'✉',accept:'.pdf',multi:false,tip:'Justifica liquidaciones sin firma'},
       {id:'librorem',label:'I · Libro Remuneraciones',icon:'📘',accept:'.pdf',multi:false,tip:'PDF tabular de remuneraciones'},
-      {id:'libroasist',label:'J · Libro Asistencia',icon:'📅',accept:'.pdf',multi:false,tip:'PDF escaneado — requiere OCR'},
+      {id:'libroasist',label:'J · Libro Asistencia',icon:'📅',accept:'.pdf',multi:true,tip:'PDF(s) escaneado(s) — uno por letra o el unificado — requiere OCR'},
       {id:'mujeres',label:'K · Acreditación Mujeres',icon:'👩',accept:'.pdf,.xlsx,.xls',multi:false,tip:'Listado/nómina de mujeres'},
       {id:'discapacidad',label:'K · Personal Discapacitado',icon:'♿',accept:'.pdf',multi:false,tip:'Listado + certificados'},
       {id:'licencias',label:'M · Licencias Médicas',icon:'🏥',accept:'.pdf',multi:true,tip:'Listado + licencias'}]},
@@ -10898,7 +10898,13 @@ function va_distanciaLevenshtein(a,b){
 // la mayoría de una lista aunque el diagnóstico de conexión IA decía
 // "conectada" y sin errores — la IA SÍ estaba leyendo las páginas bien, el
 // matching de nombre era lo que descartaba casi todo.
-const VA_STOP_TOKENS=new Set(['SR','SRA','DON','DONA','SENOR','SENORA','DE','LA','EL']);
+// MES/DIA/etc se agregaron después de ver que el regex del Libro de
+// Asistencia Antofagasta a veces captura texto de más (ej. "Acevedo Marta
+// MES" cuando el nombre y la etiqueta del mes caen en líneas seguidas del
+// OCR) — más simple filtrar la palabra suelta acá que perfeccionar el
+// regex contra todas las variantes de ruido de un OCR real.
+const VA_STOP_TOKENS=new Set(['SR','SRA','DON','DONA','SENOR','SENORA','DE','LA','EL',
+  'MES','DIA','DIAS','ANO','ANIO','TOTAL','HORAS','NOTA']);
 function va_tokensNombre(s){
   const norm=va_normalizarNombre(s);
   const out=[];
@@ -12495,19 +12501,94 @@ async function va_validarLibroRem(){
     estado:faltantes.length===0?'✅':(pct>=90?'⚠':'❌')};
 }
 
-// ── Libro Asistencia (escaneado) ──
+// ── Libro Asistencia Antofagasta (escaneado, 1 foto por trabajador) ──
+// A diferencia de Lo Barnechea (Libro intercalado dentro de Liquidaciones,
+// nombre a veces manuscrito), acá el Libro llega en archivos aparte (uno o
+// varios, por letra de apellido) y el nombre viene TIPEADO/IMPRESO arriba de
+// cada foto ("TRABAJADOR SR. Apellido Nombre") — más confiable de leer.
+// Estrategia: OCR primero (gratis, local) — si el texto que sale matchea
+// contra la nómina con va_matchNombreNomina, no hace falta gastar IA. Solo
+// si el OCR no encuentra nada usable se manda la foto a la IA visual. Con
+// una muestra real de 30 páginas de la letra A, el OCR solo identifica
+// ~15-20% de los casos sin gastar IA (la foto/alineación varía mucho
+// página a página) — igual vale la pena porque no cuesta nada probarlo primero.
 async function va_validarLibroAsist(){
   var dd=va_docsData['libroasist'];
   if(!dd||!dd.buffers||!dd.buffers.length){va_docResults['libroasist']={nombre:'Libro Asistencia',cargado:false,estado:'—'};return;}
-  // Count pages only - OCR too slow for 300+ pages
-  var doc=await pdfjsLib.getDocument({data:new Uint8Array(dd.buffers[0])}).promise;
-  var totalPags=doc.numPages;
-  var esperados=va_lhFiltered.length;
-  var ratio=esperados>0?(totalPags/(esperados*2)*100):0; // 2 pages per worker
+  if(!ren_ocrWorker){va_setProg(86,'⏳ Cargando OCR (primera vez, ~15s)…');await cargarOCR();}
+  const iaKeyOk=!!(document.getElementById('iav-key')&&document.getElementById('iav-key').value);
+  const TRABAJADOR_RE=/TRABAJADOR\s*S[RD]?[^A-Za-zÁÉÍÓÚÑáéíóúñ]{0,6}([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ\s]{3,40})/i;
+  let totalPags=0,viaOCR=0,viaIA=0,sinIdentificar=0;
+  const identificados=new Set();
+  for(const buf of dd.buffers){
+    let pdf;
+    try{pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;}catch(e){console.warn('Libro Antofagasta: PDF inválido',e);continue;}
+    for(let p=1;p<=pdf.numPages;p++){
+      totalPags++;
+      if(totalPags%10===0) va_setProg(Math.min(86+Math.round(totalPags/10),89),`📅 Libro Asistencia: pág ${totalPags}`);
+      let nombreLeido=null,fuente=null,matchWorker=null;
+      try{
+        const page=await pdf.getPage(p);
+        const vp=page.getViewport({scale:2.6});
+        const canvas=document.createElement('canvas');
+        canvas.width=vp.width;canvas.height=vp.height;
+        await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+        const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
+        // 1) OCR gratis primero
+        try{
+          const {data:{text}}=await ren_ocrWorker.recognize(blob);
+          const m=TRABAJADOR_RE.exec(text);
+          if(m){
+            const candidato=m[1].trim();
+            const match=va_matchNombreNomina(candidato,va_lhFiltered);
+            if(match){nombreLeido=candidato;fuente='OCR';matchWorker=match;}
+          }
+        }catch(ocrErr){console.warn('OCR Libro Antofagasta p'+totalPags,ocrErr);}
+        // 2) Si el OCR no identificó a nadie, recién ahí IA visual
+        if(!fuente&&iaKeyOk){
+          try{
+            const base64=await new Promise(res=>{const rd=new FileReader();rd.onloadend=()=>res(rd.result.split(',')[1]);rd.readAsDataURL(blob);});
+            const respIA=await va_iaLeerImagen(base64,
+              'Esta es una foto de un cuaderno de asistencia (Libro de Asistencia) chileno. '+
+              'Decime SOLO en JSON: {"nombre_trabajador":"..."} con el nombre impreso/tipeado en el '+
+              'campo "TRABAJADOR SR." o similar (aunque el resto de la foto sea manuscrito). Si no ves '+
+              'un nombre de trabajador identificable, respondé {"nombre_trabajador":null}.');
+            const mIA=respIA.match(/\{[\s\S]*\}/);
+            if(mIA){
+              const parsed=JSON.parse(mIA[0]);
+              if(parsed.nombre_trabajador){
+                nombreLeido=parsed.nombre_trabajador;
+                const match=va_matchNombreNomina(parsed.nombre_trabajador,va_lhFiltered);
+                if(match){fuente='IA';matchWorker=match;}
+              }
+            }
+          }catch(iaErr){console.warn('IA Libro Antofagasta p'+totalPags,iaErr);}
+        }
+      }catch(pageErr){console.warn('Libro Antofagasta pág '+totalPags,pageErr);}
+      if(matchWorker){
+        if(fuente==='OCR')viaOCR++;else viaIA++;
+        const rutM=matchWorker.rutNorm;
+        if(!va_liqMap.has(rutM))va_liqMap.set(rutM,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
+          tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false});
+        va_liqMap.get(rutM).tieneLibro=true;
+        identificados.add(rutM);
+        va_iaAuditLog.push({modulo:'Libro de Asistencia (Antofagasta)',pagina:totalPags,tipo:'LIBRO_ASISTENCIA',
+          nombreLeido,resultado:'match',atribuidoA:matchWorker.nombre,motivo:null});
+      }else{
+        sinIdentificar++;
+        va_iaAuditLog.push({modulo:'Libro de Asistencia (Antofagasta)',pagina:totalPags,tipo:'LIBRO_ASISTENCIA',
+          nombreLeido,resultado:nombreLeido?'sin_match':'sin_lectura',atribuidoA:null,
+          motivo:nombreLeido?'nombre leído no coincide con nadie de la nómina':'ni OCR ni IA lograron leer un nombre en la página'});
+      }
+    }
+  }
+  const esperados=va_lhFiltered.filter(x=>!x.termino).length;
+  const faltantes=va_lhFiltered.filter(x=>!x.termino&&!identificados.has(x.rutNorm));
   va_docResults['libroasist']={nombre:'Libro Asistencia',cargado:true,
-    totalPags:totalPags,esperados:esperados,pagsEsperadas:esperados*2,ratio:ratio.toFixed(0),
-    estado:ratio>=90?'✅':(ratio>=70?'⚠':'❌'),
-    nota:'PDF escaneado ('+totalPags+' págs). Se esperan ~'+(esperados*2)+' págs (2 por trabajador). Revisión manual requerida.'};
+    totalPags,esperados,identificados:identificados.size,viaOCR,viaIA,sinIdentificar,
+    faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre})),
+    estado:faltantes.length===0?'✅':(faltantes.length<=Math.round(esperados*0.1)?'⚠':'❌'),
+    nota:`${totalPags} páginas · ${identificados.size}/${esperados} trabajadores identificados (${viaOCR} por OCR, ${viaIA} por IA, ${sinIdentificar} páginas sin identificar)`};
 }
 
 // ── Mujeres ──
@@ -13189,6 +13270,7 @@ function va_subtab(tab){
   else if(tab==='imput') c.innerHTML=va_renderImput();
   else if(['jubilados','librorem','libroasist','mujeres','discapacidad'].includes(tab)&&va_baseKey!=='Vitacura') c.innerHTML=va_renderAntTab(tab);
   else if(tab==='libroasist'&&va_baseKey==='Vitacura') c.innerHTML=va_renderVitacuraLibroAsist();
+  else if(tab==='libroasist'&&va_baseKey==='Antofagasta') c.innerHTML=va_renderAntofagastaLibroDetalle();
   else if(tab==='libroasist') c.innerHTML=va_renderAntTab(tab);
   else if(tab==='anexos') c.innerHTML=va_renderAnexos();
   else if(tab==='cartanofirma') c.innerHTML=va_renderCartaNoFirma();
@@ -13826,6 +13908,35 @@ function va_renderImput(){
       +'</div>';
   }
 
+  return h;
+}
+
+// ── Libro Asistencia Antofagasta: detalle por trabajador ──
+// A diferencia de Lo Barnechea (solo <30 días), en Antofagasta el Libro
+// aplica a TODOS los trabajadores activos sin importar los días trabajados
+// — por eso NO se filtra por x.dias acá (pedido explícito del usuario).
+function va_renderAntofagastaLibroDetalle(){
+  const d=va_docResults['libroasist'];
+  if(!d||!d.cargado) return '<div class="ch-empty"><div class="ico">📅</div>No se cargó el Libro de Asistencia</div>';
+  let h='<div style="background:#eaf6ef;border-radius:7px;padding:10px 14px;font-size:.78rem;margin-bottom:10px">ℹ En esta base el Libro es exigible a TODOS los trabajadores activos, sin importar los días trabajados. Lectura: OCR primero (gratis) y solo si no identifica a nadie se usa IA visual.</div>';
+  h+=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">
+    <div class="ch-kpi"><div class="v">${d.esperados}</div><div class="l">Trabajadores LH</div></div>
+    <div class="ch-kpi ok"><div class="v">${d.identificados}</div><div class="l">✅ Identificados</div></div>
+    <div class="ch-kpi${d.faltantes.length?' err':''}"><div class="v">${d.faltantes.length}</div><div class="l">❌ Sin Libro</div></div>
+    <div class="ch-kpi"><div class="v">${d.totalPags}</div><div class="l">Páginas totales</div></div>
+  </div>`;
+  h+=`<div style="font-size:.72rem;color:#666;margin-bottom:10px">${d.viaOCR} identificados gratis por OCR · ${d.viaIA} requirieron IA · ${d.sinIdentificar} página(s) sin identificar a nadie</div>`;
+  if(d.faltantes.length){
+    h+='<div class="ch-section-title" style="color:#c0392b">⚠ Trabajadores sin Libro identificado</div>';
+    h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th></tr></thead><tbody>';
+    [...d.faltantes].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
+      h+=`<tr><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td></tr>`;
+    });
+    h+='</tbody></table>';
+  }else{
+    h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los trabajadores tienen Libro identificado</div>';
+  }
+  h+=va_renderIAAuditSection('Libro de Asistencia (Antofagasta)');
   return h;
 }
 
