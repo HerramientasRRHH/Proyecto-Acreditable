@@ -12432,7 +12432,13 @@ async function va_validarJubilados(){
   if(!dd||!dd.buffers||!dd.buffers.length){va_docResults['jubilados']={nombre:'Listado Jubilados',cargado:false,estado:'—'};return;}
   var ruts=new Set();
   for(var b of dd.buffers){
-    var txt=await va_getPdfTextOCR(b,10);
+    // OJO: va_getPdfTextOCR(buf,maxPagesOCR) NO hace OCR "de las primeras N
+    // páginas" — si el PDF completo tiene MÁS páginas que maxPagesOCR, se
+    // salta el OCR de TODO el archivo (es un tope de "no OCR-ear documentos
+    // gigantes", no un límite de cuántas páginas leer). El listado de
+    // Jubilados de Antofagasta puede tener 90+ páginas (una por jubilado) —
+    // con el tope viejo de 10 el archivo entero quedaba sin leer.
+    var txt=await va_getPdfTextOCR(b,150);
     va_findAllRuts(txt).forEach(function(r){ruts.add(r);});
   }
   dd.rutsFound=ruts;
