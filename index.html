@@ -13164,14 +13164,12 @@ function va_renderResultados(){
   if(basesConLicEnLiqTabs.includes(va_baseKey)){baseTabs.push('libro');}
   if(va_baseKey==='Antofagasta'){baseTabs.push('imput','jubilados','anexos','cartanofirma','librorem','libroasist','mujeres','discapacidad');}
   if(va_baseKey==='Vitacura'){baseTabs.push('contratos','nominas','epp','libroasist','subcontrato');}
-  if(va_iaAuditLog.length){baseTabs.push('iadiag');}
   const tabs=baseTabs;
   const tabLabels={liq:'📄 Liquidaciones',finiq:'📑 Finiquitos',licencias:'🏥 Lic. Médicas',exencion:'👴 Exenciones',f30:'📋 F30',f301:'📋 F30-1',previred:'💰 PreviRed',
     libro:'📅 Libro Asistencia',
     imput:'📊 IMPUT',jubilados:'👴 Jubilados',anexos:'🔁 Reemplazos',cartanofirma:'✉ Carta NoFirma',
     librorem:'📘 Libro Rem.',libroasist:'📅 Libro Asist.',mujeres:'👩 Mujeres',discapacidad:'♿ Discapacidad',
-    nominas:'📊 Nóminas',epp:'🦺 EPP',subcontrato:'🏢 O · Subcontrato',contratos:'📝 Contratos',
-    iadiag:'🔍 IA Detalle'};
+    nominas:'📊 Nóminas',epp:'🦺 EPP',subcontrato:'🏢 O · Subcontrato',contratos:'📝 Contratos'};
   document.getElementById('va-subtabs').innerHTML=tabs.map(t=>
     `<button class="ch-stab${va_subtabActiva===t?' active':''}" data-vstab="${t}" onclick="va_subtab('${t}')">${tabLabels[t]||t}</button>`
   ).join('');
@@ -13198,7 +13196,6 @@ function va_subtab(tab){
   else if(tab==='epp') c.innerHTML=va_renderEPP();
   else if(tab==='subcontrato') c.innerHTML=va_renderSubcontrato();
   else if(tab==='contratos'&&va_baseKey==='Vitacura') c.innerHTML=va_renderContratosVitacura();
-  else if(tab==='iadiag') c.innerHTML=va_renderIADiag();
   else c.innerHTML=va_renderCruceTab(tab);
 }
 
@@ -13312,6 +13309,7 @@ function va_renderLiq(){
       <td style="font-size:.68rem">${docsHtml}</td></tr>`;
   }
   h += '</tbody></table></div>';
+  h += va_renderIAAuditSection('Contrato (firma QR)');
   return h;
 }
 function va_ampliar(src){
@@ -13405,7 +13403,11 @@ function va_renderFiniq(){
 // Permiso; etc. Cuando no coincide, se flagea para revisión manual.
 function va_renderLibroDetalle(){
   if(!va_liqMap.size) return '<div class="ch-empty"><div class="ico">📅</div>Sin resultados — corré la validación primero</div>';
-  const filas=va_lhFiltered.filter(x=>!x.termino).map(x=>{
+  // El Libro de Asistencia en esta base solo es exigible a quien trabajó
+  // menos de 30 días en el período (mismo filtro que el caso MENOS_30 de
+  // va_clasificar) — a alguien con el mes completo no le corresponde tener
+  // Libro, así que no tiene sentido mostrarlo acá como "faltante".
+  const filas=va_lhFiltered.filter(x=>!x.termino&&x.dias<30&&x.dias>0).map(x=>{
     const w=va_liqMap.get(x.rutNorm);
     const tiene=!!(w&&w.tieneLibro);
     if(!tiene){
@@ -13435,7 +13437,7 @@ function va_renderLibroDetalle(){
   const disc=filas.filter(f=>f.estado==='discrepancia').length;
   const sinLect=filas.filter(f=>f.estado==='sinlectura').length;
   const falt=filas.filter(f=>f.estado==='faltante').length;
-  let h='<div style="background:#eaf6ef;border-radius:7px;padding:10px 14px;font-size:.78rem;margin-bottom:10px">ℹ Cruza lo que la IA lee en cada foto del Libro (Faltas/Permisos/días de Licencia marcados) contra lo que informa la liquidación del trabajador (que refleja el Libro de Haberes).</div>';
+  let h='<div style="background:#eaf6ef;border-radius:7px;padding:10px 14px;font-size:.78rem;margin-bottom:10px">ℹ Solo se listan los trabajadores con <strong>menos de 30 días</strong> en el período — a los demás no les corresponde tener Libro. Cruza lo que la IA lee en cada foto del Libro (Faltas/Permisos/días de Licencia marcados) contra lo que informa la liquidación del trabajador (que refleja el Libro de Haberes).</div>';
   h+=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">
     <div class="ch-kpi ok"><div class="v">${ok}</div><div class="l">✅ Coincide</div></div>
     <div class="ch-kpi${disc?' warn':''}"><div class="v">${disc}</div><div class="l">⚠ Discrepancia</div></div>
@@ -13452,6 +13454,7 @@ function va_renderLibroDetalle(){
       `<td style="font-size:.7rem">${f.obs}</td></tr>`;
   });
   h+='</tbody></table>';
+  h+=va_renderIAAuditSection('Libro de Asistencia');
   return h;
 }
 
@@ -13487,6 +13490,7 @@ function va_renderLicencias(){
       h+=`<tr><td>${f.estado}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLic}</td><td style="font-size:.72rem">${f.obs}</td></tr>`;
     });
     h+='</tbody></table>';
+    h+=va_renderIAAuditSection('Licencia Médica (inline)');
     return h;
   }
   const d=va_docResults['licencias'];
@@ -13530,7 +13534,7 @@ function va_renderExencion(){
     <div class="ch-kpi${d.faltantes.length?' err':''}"><div class="v">${d.faltantes.length}</div><div class="l">Faltantes</div></div>
   </div>`;
   if(d.paginasIA){
-    h+=`<div style="background:#f2f7ff;border:1px solid #cfe0f5;border-radius:7px;padding:6px 12px;margin-bottom:10px;font-size:.72rem;color:#375;display:inline-block">🔧 ${d.paginasIA} página(s) sin RUT reconocible se verificaron con IA visual (ver pestaña 🔍 IA Detalle)</div><br>`;
+    h+=`<div style="background:#f2f7ff;border:1px solid #cfe0f5;border-radius:7px;padding:6px 12px;margin-bottom:10px;font-size:.72rem;color:#375;display:inline-block">🔧 ${d.paginasIA} página(s) sin RUT reconocible se verificaron con IA visual (ver detalle abajo)</div><br>`;
   }
   if(d.faltantes.length){
     h+='<div class="ch-section-title" style="color:#c0392b">⚠ Jubilados en LH sin exención en PDF</div>';
@@ -13538,45 +13542,39 @@ function va_renderExencion(){
     [...d.faltantes].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{h+=`<tr><td>${f.rut}</td><td>${f.nombre}</td></tr>`;});
     h+='</tbody></table>';
   }else{h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los jubilados del LH tienen exención</div>';}
+  h+=va_renderIAAuditSection('Exención Cotizar');
   return h;
 }
 
-// ── Diagnóstico IA detallado ──
-// Muestra, por cada página que la IA procesó (Libro, Licencia inline, firma
-// de Contrato, Exención Cotizar), qué leyó exactamente y si el matching le
-// atribuyó a alguien o lo rechazó — para ver directo en la app POR QUÉ algo
-// quedó "faltante" sin tener que reproducirlo con scripts aparte. Ver skill
-// acreditable-review para el proceso manual que esto reemplaza/acelera.
-function va_renderIADiag(){
-  if(!va_iaAuditLog.length) return '<div class="ch-empty"><div class="ico">🔍</div>Esta corrida no generó lecturas con IA (¿motor IA no configurado, o ninguna página ambigua?)</div>';
-  const total=va_iaAuditLog.length;
-  const matches=va_iaAuditLog.filter(x=>x.resultado==='match'||x.resultado==='firma_trabajador'||x.resultado==='firma_empleador').length;
-  const sinMatch=va_iaAuditLog.filter(x=>x.resultado==='sin_match').length;
-  const sinLectura=va_iaAuditLog.filter(x=>x.resultado==='sin_lectura').length;
-  let h=`<div style="background:#eaf6ef;border-radius:7px;padding:10px 14px;font-size:.78rem;margin-bottom:10px">ℹ Cada fila es una página que la IA leyó como parte de esta corrida. "Sin match" significa que la IA SÍ leyó un nombre pero no coincide con nadie de la nómina — revisar la página real antes de asumir que el documento falta.</div>`;
-  h+=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">
-    <div class="ch-kpi"><div class="v">${total}</div><div class="l">Páginas leídas</div></div>
-    <div class="ch-kpi ok"><div class="v">${matches}</div><div class="l">✅ Atribuidas</div></div>
-    <div class="ch-kpi${sinMatch?' warn':''}"><div class="v">${sinMatch}</div><div class="l">⚠ Sin match</div></div>
-    <div class="ch-kpi${sinLectura?' warn':''}"><div class="v">${sinLectura}</div><div class="l">⚠ Sin lectura</div></div>
-  </div>`;
-  const porModulo=new Map();
-  for(const e of va_iaAuditLog){
-    if(!porModulo.has(e.modulo)) porModulo.set(e.modulo,[]);
-    porModulo.get(e.modulo).push(e);
-  }
+// ── Detalle de lectura con IA, integrado en cada módulo ──
+// En vez de una pestaña aparte que junta todo, cada módulo (Libro, Licencia,
+// Contrato, Exención) pinta su propio detalle llamando a este helper con su
+// nombre de módulo — así el detalle de "qué leyó la IA y a quién se lo
+// atribuyó" queda pegado al mismo lugar donde ya se ve el resultado de ese
+// módulo, en vez de obligar a saltar a otra pestaña a cruzarlo a mano.
+// Devuelve '' (nada) si ese módulo no tuvo lecturas con IA en esta corrida.
+function va_renderIAAuditSection(nombreModulo){
+  const nombres=Array.isArray(nombreModulo)?nombreModulo:[nombreModulo];
+  const entradas=va_iaAuditLog.filter(e=>nombres.includes(e.modulo));
+  if(!entradas.length) return '';
+  const matches=entradas.filter(x=>x.resultado==='match'||x.resultado==='firma_trabajador'||x.resultado==='firma_empleador').length;
+  const sinMatch=entradas.filter(x=>x.resultado==='sin_match').length;
+  const sinLectura=entradas.filter(x=>x.resultado==='sin_lectura').length;
   const iconos={match:'✅',firma_trabajador:'✅ (trabajador)',firma_empleador:'✅ (empleador)',sin_match:'⚠',sin_lectura:'⚠'};
-  for(const [modulo,entradas] of porModulo){
-    h+=`<div class="ch-section-title" style="margin-top:16px">${modulo} — ${entradas.length} página(s)</div>`;
-    h+='<table class="ch-tbl"><thead><tr><th></th><th>Pág.</th><th>Nombre leído por la IA</th><th>Resultado</th><th>Motivo / atribuido a</th></tr></thead><tbody>';
-    [...entradas].sort((a,b)=>a.pagina-b.pagina).forEach(e=>{
-      h+=`<tr><td>${iconos[e.resultado]||e.resultado}</td><td>${e.pagina}</td>`+
-        `<td style="font-size:.72rem">${e.nombreLeido||'<span style="color:#999">—</span>'}</td>`+
-        `<td style="font-size:.72rem">${e.resultado}</td>`+
-        `<td style="font-size:.72rem">${e.atribuidoA?('→ '+e.atribuidoA):(e.motivo||'')}</td></tr>`;
-    });
-    h+='</tbody></table>';
-  }
+  let h=`<div class="ch-section-title" style="margin-top:18px">🔍 Detalle de lectura con IA — ${entradas.length} página(s)</div>`;
+  h+=`<div style="background:#eaf6ef;border-radius:7px;padding:8px 12px;font-size:.74rem;margin-bottom:10px">ℹ "Sin match" = la IA leyó un nombre pero no coincide con nadie de la nómina — revisar la página real antes de asumir que el documento falta.</div>`;
+  h+=`<div style="display:flex;gap:14px;margin-bottom:10px;flex-wrap:wrap;font-size:.74rem">
+    <span style="color:#16613a">✅ ${matches} atribuida(s)</span>
+    ${sinMatch?`<span style="color:#a07900">⚠ ${sinMatch} sin match</span>`:''}
+    ${sinLectura?`<span style="color:#a07900">⚠ ${sinLectura} sin lectura</span>`:''}
+  </div>`;
+  h+='<table class="ch-tbl"><thead><tr><th></th><th>Pág.</th><th>Nombre leído por la IA</th><th>Motivo / atribuido a</th></tr></thead><tbody>';
+  [...entradas].sort((a,b)=>a.pagina-b.pagina).forEach(e=>{
+    h+=`<tr><td>${iconos[e.resultado]||e.resultado}</td><td>${e.pagina}</td>`+
+      `<td style="font-size:.72rem">${e.nombreLeido||'<span style="color:#999">—</span>'}</td>`+
+      `<td style="font-size:.72rem">${e.atribuidoA?('→ '+e.atribuidoA):(e.motivo||'')}</td></tr>`;
+  });
+  h+='</tbody></table>';
   return h;
 }
 
