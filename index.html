@@ -10677,6 +10677,22 @@ function va_findAllRuts(txt){
   }
   return ruts;
 }
+// Igual que va_findAllRuts (Patrones 1 y 2, los más comunes en tablas/formularios)
+// pero SIN validar dígito verificador — para cuando un solo carácter mal leído
+// por OCR invalida el checksum del RUT real y por eso nunca llega a pasar el
+// filtro de va_addRut. Pensado para usarse solo como entrada de
+// va_matchRutCercano (que sí exige coincidencia inequívoca contra la nómina
+// real), nunca para aceptar un RUT "tal cual" sin ese cruce.
+function va_findAllRutsRaw(txt){
+  const ruts=new Set();
+  for(const m of txt.matchAll(/(?<![\d.,])(\d{1,2})[.,\s](\d{3})[.,\s](\d{3})[\s-]+(\d|[kK])/g)){
+    ruts.add(va_normRut(m[1]+m[2]+m[3]+'-'+m[4]));
+  }
+  for(const m of txt.matchAll(/(?<!\d)(\d{7,8})\s*-\s*(\d|[kK])(?!\d)/g)){
+    ruts.add(va_normRut(m[1]+'-'+m[2]));
+  }
+  return ruts;
+}
 
 // ── Dígito verificador chileno (módulo 11) — para validar/corregir RUTs ruidosos de OCR ──
 function va_dvRut(cuerpo){
@@ -11637,6 +11653,20 @@ async function va_validarLiquidaciones(){
           for(const r of pageRuts){
             const cercano=va_matchRutCercano(r,lhRuts);
             if(cercano){pageRut=cercano;break;}
+          }
+          if(!pageRut){
+            // Caso real (Antofagasta): OCR lee "RUT: 12.214.857-k" pero el
+            // real es "12.214.867-k" — un solo dígito equivocado invalida el
+            // propio dígito verificador, así que va_findAllRuts lo descarta
+            // ANTES de llegar a pageRuts (nunca es candidato para el "cercano"
+            // de arriba). Acá se prueban también los candidatos SIN validar
+            // DV — el filtro de ambigüedad de va_matchRutCercano (debe ganarle
+            // por más de 1 de distancia al segundo más parecido) evita que
+            // esto cuele un cruce falso.
+            for(const r of va_findAllRutsRaw(txt)){
+              const cercano=va_matchRutCercano(r,lhRuts);
+              if(cercano){pageRut=cercano;break;}
+            }
           }
         }
         if(!pageRut&&pageRuts.size>0) pageRut=[...pageRuts][0];

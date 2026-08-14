@@ -306,6 +306,35 @@ de asumir que faltan archivos o que el documento está incompleto — probá el
 regex aislado contra un fragmento real con `re.finditer` y mirá los `span()`
 de cada match, no solo el resultado final.
 
+## "Sin liquidación en el PDF" puede ser 1 dígito mal leído, no un documento faltante
+
+Siguiendo el hallazgo de arriba, 4 trabajadores de la corrida de prueba
+salían como "sin liquidación detectada" en TODO el archivo. Antes de asumir
+que la página no está, se buscó su APELLIDO (no el RUT) en los 25 archivos
+completos — y en los 4 casos la página SÍ existe, está completa y legible,
+pero el RUT específicamente salió mal por OCR:
+`RUT: 12.214.857-k` (real: `12.214.867-k`, 1 dígito), o directo el label
+"RUT:" se lee como basura y se pierde el primer dígito
+(`'5.090.140-2` en vez de `25.090.140-2`). Como `va_addRut()` exige que el
+dígito verificador calce, estos candidatos ni siquiera llegan a `pageRuts` —
+y ya existía `va_matchRutCercano()` (Levenshtein distancia 1, exige que el
+mejor candidato le gane por más de 1 al segundo) para rescatar justo este
+caso, pero solo se aplicaba sobre `pageRuts` (que ya viene filtrado por
+checksum) — nunca le llegaban estos candidatos porque el propio checksum
+inválido los descartaba antes.
+
+Fix: `va_findAllRutsRaw()` (mismos Patrones 1 y 2 de `va_findAllRuts`, SIN
+`va_addRut`/validación de DV) como fuente adicional para
+`va_matchRutCercano()` cuando ni el match exacto ni el "cercano" sobre
+`pageRuts` encontraron a nadie. Validado contra los 4 casos reales, cruzando
+contra la nómina COMPLETA (350 RUT reales, no una muestra) — los 4 resuelven
+sin ambigüedad (la segunda mejor coincidencia siempre quedó a distancia ≥3).
+Este patrón (RUT con 1 dígito mal leído, o roto/truncado por el label
+"RUT:" mal reconocido) es específico de Liquidaciones porque ahí el RUT es
+central para el tracking del trabajador de la página — en otros documentos
+(Previred, F30-1, etc.) un RUT perdido por esto no rompe nada porque se
+cruza el SET completo contra la nómina, no un RUT individual por página.
+
 ## Corriendo una auditoría de prueba completa: usa Python, no el navegador sandbox
 
 Se intentó correr `va_ejecutar()` completo en el navegador sandbox de Claude
