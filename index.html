@@ -11823,13 +11823,26 @@ async function va_validarLiquidaciones(){
 }
 
 // ── 4.2 FINIQUITOS ──
+// Hallazgo real (Antofagasta): el PDF de Finiquitos a veces NO es un
+// finiquito en sí, sino una carta a la Municipalidad informando qué
+// trabajadores TODAVÍA NO han ido a notaría a firmar ("Se informa que N
+// trabajadores no se han acercado a notaría a firmar su finiquito"). Sin
+// este detector esos RUT igual terminan en el balde "sinrespaldo" (porque
+// no hay lenguaje de notaría/respaldo para ellos, correcto por casualidad),
+// pero con un mensaje genérico que pierde el contexto real. Se detecta esta
+// carta explícitamente para que el mensaje diga la razón real.
+const VA_CARTA_FINIQ_PENDIENTE_RE=/no\s+se\s+han?\s+acercado\s+a\s+notar[ií]a\s+a\s+firmar/i;
 async function va_validarFiniquitos(){
   const dd=va_docsData['finiq'];if(!dd||!dd.buffers.length)return{cargado:false};
   const ruts=new Set();const legalizados=new Set();const respaldados=new Set();
   const tipoPorRut=new Map(); // rutNorm -> 'Vale Vista' | 'Carta empresa' | ... (para el detalle)
+  const cartaPendienteRuts=new Set();
   for(const buf of dd.buffers){
     const txt=await va_getPdfTextOCR(buf);
     va_findAllRuts(txt).forEach(r=>va_addRut(ruts,r));
+    if(VA_CARTA_FINIQ_PENDIENTE_RE.test(txt)){
+      va_findAllRuts(txt).forEach(r=>cartaPendienteRuts.add(r));
+    }
     // Cada bloque = desde un "Finiquito al contrato de trabajo" hasta el próximo,
     // así que incluye también las páginas de respaldo (carta DT, vale vista, etc.)
     // que vienen intercaladas justo después de cada finiquito.
@@ -11851,6 +11864,8 @@ async function va_validarFiniquitos(){
   const cubiertos=finiqLH.filter(x=>ruts.has(x.rutNorm));
   const faltantes=finiqLH.filter(x=>!ruts.has(x.rutNorm));
   // Presente pero sin notaría NI ningún comprobante alternativo aceptado
+  // (esto incluye a los reportados por carta como pendientes — siguen sin
+  // estar completos, solo cambia el mensaje que se muestra por trabajador)
   const sinRespaldo=finiqLH.filter(x=>ruts.has(x.rutNorm)&&!legalizados.has(x.rutNorm)&&!respaldados.has(x.rutNorm));
   const extras=[...ruts].filter(r=>!va_lhFiltered.some(x=>x.rutNorm===r&&x.termino));
   // Detalle por trabajador (para la tabla completa: notariado / tipo de respaldo / sin nada)
@@ -11859,6 +11874,7 @@ async function va_validarFiniquitos(){
     if(!ruts.has(x.rutNorm)){estado='faltante';detalleTxt='Sin finiquito en el PDF';}
     else if(legalizados.has(x.rutNorm)){estado='legalizado';detalleTxt='Notariado (ratificado ante notario)';}
     else if(respaldados.has(x.rutNorm)){estado='respaldo';detalleTxt=tipoPorRut.get(x.rutNorm)||'Con respaldo alternativo';}
+    else if(cartaPendienteRuts.has(x.rutNorm)){estado='cartaPendiente';detalleTxt='Según carta a la Municipalidad: no se ha acercado a notaría a firmar (pendiente)';}
     else{estado='sinrespaldo';detalleTxt='Sin notaría ni respaldo alternativo detectado';}
     return{rut:x.rut,nombre:x.nombre,estado,detalle:detalleTxt};
   });
@@ -13731,7 +13747,7 @@ function va_renderFiniq(){
     h+='</tbody></table>';
   }else{h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los finiquitados del LH están en el PDF</div>';}
   if(d.detalle&&d.detalle.length){
-    const iconos={legalizado:'✅',respaldo:'✅',sinrespaldo:'⚠',faltante:'❌'};
+    const iconos={legalizado:'✅',respaldo:'✅',sinrespaldo:'⚠',cartaPendiente:'⚠',faltante:'❌'};
     h+='<div class="ch-section-title" style="margin-top:16px">📋 Detalle por trabajador — notariado / tipo de respaldo</div>';
     h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Detalle</th></tr></thead><tbody>';
     [...d.detalle].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
