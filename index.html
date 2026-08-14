@@ -12480,6 +12480,95 @@ async function va_validarCartaNoFirma(){
   va_docResults['cartanofirma']={nombre:'Carta No Firma',cargado:true,rutsDoc:ruts.size,cartaRuts:ruts,estado:'✅'};
 }
 
+// ── Contratos Antofagasta: firma trabajador + empleador ──
+// A diferencia de Lo Barnechea (Contrato intercalado dentro del PDF de
+// Liquidaciones), acá cada trabajador NUEVO tiene su propio archivo PDF
+// individual ("Contrato de trabajo [Nombre].pdf") en el slot 'contratos'.
+// El nombre del ARCHIVO ya identifica al trabajador de forma confiable (se
+// validó contra los 23 archivos reales de la muestra: 23/23 matchean sin
+// ambigüedad contra los nuevos ingresos del período) — no hace falta leer
+// el contenido para saber DE QUIÉN es, solo para verificar la firma.
+// Cada archivo empaqueta 3 documentos (Contrato + Anexo Cargo + Anexo Pacto
+// HHEE), cada uno con su propio bloque "Firmado electrónicamente por:" con
+// AMBAS partes en la misma línea/página (a diferencia de Lo Barnechea, acá
+// no hay que inferir por descarte). El OCR ya lee ese bloque de dos
+// columnas correctamente en la mayoría de los casos (texto impreso limpio,
+// no manuscrito) — solo se usa IA si una página no tiene NINGÚN firmante
+// legible por OCR.
+async function va_validarContratosAntofagasta(){
+  const dd=va_docsData['contratos'];
+  const res={nombre:'H · Contratos',cargado:false,estado:'—',detalle:'',nuevos:0,cubiertos:0,faltantes:[]};
+  va_docResults['contratos']=res;
+  if(!dd||!dd.buffers||!dd.buffers.length){res.estado='⚪ No cargado';return;}
+  res.cargado=true;
+  if(!ren_ocrWorker){va_setProg(84,'⏳ Cargando OCR (primera vez, ~15s)…');await cargarOCR();}
+  const iaKeyOk=!!(document.getElementById('iav-key')&&document.getElementById('iav-key').value);
+  const nuevosLH=va_lhFiltered.filter(x=>{
+    if(!x.ingreso)return false;
+    if(va_periodoMes&&va_periodoAnio)return x.ingreso.getMonth()+1===va_periodoMes&&x.ingreso.getFullYear()===va_periodoAnio;
+    return false;
+  });
+  res.nuevos=nuevosLH.length;
+  const NOMBRE_RE=/Nombre\s+([A-ZÁÉÍÓÚÑ][^\n:]+?)(?=\s*:?\s*Nombre\b|\s*\n|$)/gi;
+  const cubiertosSet=new Set();
+  const incompletos=[];
+  for(let bi=0;bi<dd.buffers.length;bi++){
+    const buf=dd.buffers[bi];
+    const fname=(dd.files[bi]&&dd.files[bi].name)||'';
+    const nombreArchivo=fname.replace(/\.pdf$/i,'').replace(/^Contrato\s+de\s+[Tt]rabajo\s+(de\s+)?/i,'').trim();
+    if(!nombreArchivo)continue;
+    const worker=va_matchNombreNomina(nombreArchivo,nuevosLH);
+    if(!worker)continue; // no matchea con ningún nuevo ingreso del período — no es un caso a exigir acá
+    let firmaTrab=false,firmaEmp=false;
+    try{
+      const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
+      for(let p=1;p<=pdf.numPages;p++){
+        const page=await pdf.getPage(p);
+        const vp=page.getViewport({scale:2.6});
+        const canvas=document.createElement('canvas');
+        canvas.width=vp.width;canvas.height=vp.height;
+        await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+        const blob=await new Promise(res2=>canvas.toBlob(res2,'image/png'));
+        let firmantes=[];
+        try{
+          const {data:{text}}=await ren_ocrWorker.recognize(blob);
+          firmantes=[...text.matchAll(NOMBRE_RE)].map(m=>m[1].trim()).filter(Boolean);
+        }catch(ocrErr){console.warn('OCR Contrato Antofagasta p'+p,ocrErr);}
+        if(!firmantes.length&&iaKeyOk){
+          try{
+            const base64=await new Promise(res2=>{const rd=new FileReader();rd.onloadend=()=>res2(rd.result.split(',')[1]);rd.readAsDataURL(blob);});
+            const respIA=await va_iaLeerImagen(base64,
+              'Esta es una página de un Contrato de Trabajo chileno (o su Anexo), escaneada. Si tiene un '+
+              'bloque "Firmado electrónicamente por:" con nombre(s), respondé SOLO en JSON: '+
+              '{"firmantes":["nombre1","nombre2"]} (uno o dos nombres, los que veas ahí). Si no hay ningún '+
+              'bloque de firma en esta página, respondé {"firmantes":[]}.');
+            const mIA=respIA.match(/\{[\s\S]*\}/);
+            if(mIA){const parsed=JSON.parse(mIA[0]);if(Array.isArray(parsed.firmantes))firmantes=parsed.firmantes.filter(Boolean);}
+          }catch(iaErr){console.warn('IA Contrato Antofagasta p'+p,iaErr);}
+        }
+        for(const nombreFirmante of firmantes){
+          const esElTrabajador=va_coberturaTokens(va_tokensNombre(nombreFirmante),va_tokensNombre(worker.nombre))>=0.6;
+          va_iaAuditLog.push({modulo:'Contrato (Antofagasta)',pagina:p,tipo:'FIRMA_CONTRATO',
+            nombreLeido:nombreFirmante,resultado:esElTrabajador?'firma_trabajador':'firma_empleador',
+            atribuidoA:worker.nombre,motivo:esElTrabajador?null:'no coincide con el trabajador rastreado — se asume firma del empleador'});
+          if(esElTrabajador)firmaTrab=true;else firmaEmp=true;
+        }
+      }
+    }catch(fileErr){console.warn('Contrato Antofagasta '+fname,fileErr);}
+    if(firmaTrab&&firmaEmp){
+      cubiertosSet.add(worker.rutNorm);
+    }else{
+      incompletos.push({rut:worker.rut,nombre:worker.nombre,
+        falta:!firmaTrab&&!firmaEmp?'ambas firmas':(!firmaTrab?'firma del trabajador':'firma del empleador')});
+    }
+  }
+  const sinArchivo=nuevosLH.filter(x=>!cubiertosSet.has(x.rutNorm)&&!incompletos.some(i=>i.rut===x.rut));
+  res.cubiertos=cubiertosSet.size;
+  res.faltantes=[...incompletos,...sinArchivo.map(x=>({rut:x.rut,nombre:x.nombre,falta:'archivo de contrato'}))];
+  res.estado=res.faltantes.length===0?'✅':'⚠';
+  res.detalle=`${cubiertosSet.size}/${nuevosLH.length} nuevos con Contrato firmado por ambas partes`;
+}
+
 // ── Libro Remuneraciones ──
 async function va_validarLibroRem(){
   var dd=va_docsData['librorem'];
@@ -13186,6 +13275,7 @@ async function va_ejecutar(){
       setPg(86,'Validando Libro Asistencia...');await va_validarLibroAsist();
       setPg(87,'Validando Acreditación Mujeres...');await va_validarMujeres();
       setPg(88,'Validando Personal Discapacitado...');await va_validarDiscapacidad();
+      setPg(89,'Validando Contratos (firma nuevos ingresos)...');await va_validarContratosAntofagasta();
     }
     // ── Nuevas validaciones Vitacura ──
     if(va_baseKey==='Vitacura'){
@@ -13199,7 +13289,7 @@ for(const id of Object.keys(va_docsData)){
       if(['liq','finiq','licencias','exencion','f30','f301','previred',
           'imput','jubilados','anexos','cartanofirma','librorem','libroasist','mujeres','discapacidad',
           'nominas','nom_sueldo','nom_cargo','nom_ingreso','nom_finiquito','nom_impositivo',
-          'epp','libroasist_carta',
+          'epp','libroasist_carta','contratos',
           'sub_lh','sub_f30','sub_f301','sub_liq','sub_finiq','sub_previred','sub_libroasist','sub_contratos','sub_nominas'
         ].includes(id))continue;
       await va_validarGenerico(id);
@@ -13243,7 +13333,7 @@ function va_renderResultados(){
   const baseTabs=['liq','finiq','licencias','exencion','f30','f301','previred'];
   const basesConLicEnLiqTabs=['Lo Barnechea','Las Condes','Mejillones'];
   if(basesConLicEnLiqTabs.includes(va_baseKey)){baseTabs.push('libro');}
-  if(va_baseKey==='Antofagasta'){baseTabs.push('imput','jubilados','anexos','cartanofirma','librorem','libroasist','mujeres','discapacidad');}
+  if(va_baseKey==='Antofagasta'){baseTabs.push('imput','jubilados','anexos','cartanofirma','librorem','libroasist','mujeres','discapacidad','contratos');}
   if(va_baseKey==='Vitacura'){baseTabs.push('contratos','nominas','epp','libroasist','subcontrato');}
   const tabs=baseTabs;
   const tabLabels={liq:'📄 Liquidaciones',finiq:'📑 Finiquitos',licencias:'🏥 Lic. Médicas',exencion:'👴 Exenciones',f30:'📋 F30',f301:'📋 F30-1',previred:'💰 PreviRed',
@@ -13278,6 +13368,7 @@ function va_subtab(tab){
   else if(tab==='epp') c.innerHTML=va_renderEPP();
   else if(tab==='subcontrato') c.innerHTML=va_renderSubcontrato();
   else if(tab==='contratos'&&va_baseKey==='Vitacura') c.innerHTML=va_renderContratosVitacura();
+  else if(tab==='contratos'&&va_baseKey==='Antofagasta') c.innerHTML=va_renderContratosAntofagasta();
   else c.innerHTML=va_renderCruceTab(tab);
 }
 
@@ -13937,6 +14028,30 @@ function va_renderAntofagastaLibroDetalle(){
     h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los trabajadores tienen Libro identificado</div>';
   }
   h+=va_renderIAAuditSection('Libro de Asistencia (Antofagasta)');
+  return h;
+}
+
+// ── Contratos Antofagasta: detalle por nuevo ingreso ──
+function va_renderContratosAntofagasta(){
+  const d=va_docResults['contratos'];
+  if(!d||!d.cargado) return '<div class="ch-empty"><div class="ico">📝</div>No se cargó la carpeta de Contratos</div>';
+  let h='<div style="background:#eaf6ef;border-radius:7px;padding:10px 14px;font-size:.78rem;margin-bottom:10px">ℹ Solo se exige Contrato a los trabajadores NUEVOS del período (según fecha de ingreso del Libro de Haberes). Cada archivo debe tener la firma del trabajador Y del empleador.</div>';
+  h+=`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px">
+    <div class="ch-kpi"><div class="v">${d.nuevos}</div><div class="l">Nuevos del período</div></div>
+    <div class="ch-kpi ok"><div class="v">${d.cubiertos}</div><div class="l">✅ Firmado completo</div></div>
+    <div class="ch-kpi${d.faltantes.length?' err':''}"><div class="v">${d.faltantes.length}</div><div class="l">⚠ Incompleto/faltante</div></div>
+  </div>`;
+  if(d.faltantes.length){
+    h+='<div class="ch-section-title" style="color:#c0392b">⚠ Nuevos ingresos con Contrato incompleto o sin archivo</div>';
+    h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th><th>Falta</th></tr></thead><tbody>';
+    [...d.faltantes].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
+      h+=`<tr><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="font-size:.72rem;color:#c0392b">${f.falta}</td></tr>`;
+    });
+    h+='</tbody></table>';
+  }else{
+    h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los nuevos ingresos tienen Contrato firmado por ambas partes</div>';
+  }
+  h+=va_renderIAAuditSection('Contrato (Antofagasta)');
   return h;
 }
 
