@@ -168,6 +168,49 @@ Mensaje de commit largo: qué bug es, qué evidencia real lo confirma (no
 Esto es lo que le permite a la próxima persona (o a vos, en el próximo
 chequeo) confiar en el commit sin tener que re-auditar desde cero.
 
+## "Verificá que esté el documento" no es lo mismo que "verificá que exista alguna firma"
+
+Cuando un tipo de documento en realidad empaqueta VARIOS documentos exigidos
+(ej. Contrato de Antofagasta = Contrato + Anexo Cargo + Anexo Pacto Horas
+Extras, 3 documentos con firma propia cada uno), no alcanza con revisar "¿hay
+alguna firma en algún lado del archivo?" — hay que confirmar que CADA
+documento exigido esté presente Y firmado por separado. Preguntale al
+usuario cuáles son los documentos exactos si no es obvio por la carpeta (acá
+no había carpeta de CI/Antecedentes como en Lo Barnechea, así que en vez de
+asumir que faltaba subir algo, se preguntó directo — la respuesta confirmó
+que Antofagasta simplemente no exige esos dos ahí). El patrón de rastreo
+pegajoso (`enContratoHasta` en Lo Barnechea, `tipoActual` en
+`va_validarContratosAntofagasta`) sirve para esto: el título de cada
+documento solo aparece en su primera página, las páginas de firma/
+continuación heredan el tipo del último título visto.
+
+## Firma física: buscar por la ETIQUETA impresa, no por una zona fija
+
+Una misma base puede mezclar modalidades de firma archivo por archivo — en
+Antofagasta algunos trabajadores firman por QR (texto "Firmado
+electrónicamente por:") y otros a mano, en el mismo lote de contratos. Para
+detectar firma física, NO calibres una zona fija de la página (ej. "70%-90%
+de la altura") — la posición real cambia según si la firma tiene página
+propia o comparte página con el cuerpo del documento. En cambio:
+
+1. Usá el resultado de OCR con posiciones (`ren_ocrWorker.recognize(blob)` —
+   confirmado que Tesseract.js v5 en este proyecto devuelve `data.words[]`
+   con `.text` y `.bbox:{x0,y0,x1,y1}` por defecto, sin config extra).
+2. Buscá la ÚLTIMA aparición de la etiqueta impresa ("TRABAJADOR"/
+   "EMPLEADOR"/nombre de la empresa) — la última, porque esas palabras
+   también aparecen sueltas dentro del texto de las cláusulas ("el
+   trabajador", "el empleador"), y el bloque de firma real siempre es lo
+   último de la página.
+3. Revisá la densidad de tinta en una franja arriba de esa etiqueta (`va_detectarFirmaFisicaPorEtiqueta()`,
+   ~70px de alto en la escala de render usada, umbral ≥1% de píxeles oscuros).
+
+Esto reemplaza (y valida por primera vez con datos reales) la heurística de
+zona fija que había quedado sin verificar en el Contrato de Lo Barnechea.
+Probá primero con un canvas sintético (dibujar un garabato arriba de un
+texto conocido) contra el `ren_ocrWorker` real del navegador antes de
+confiar en el resultado — así se confirmó que funciona sin necesitar una
+página real todavía disponible.
+
 ## Trampas encontradas al auditar una carpeta completa (no solo un caso puntual)
 
 Cuando el pedido es "revisá/integrá todo lo que hay en esta carpeta" en vez
