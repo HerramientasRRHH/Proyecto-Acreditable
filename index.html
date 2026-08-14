@@ -10633,7 +10633,15 @@ function va_setProg(p,m){document.getElementById('va-pf').style.width=p+'%';docu
 function va_findAllRuts(txt){
   const ruts=new Set();
   // Pattern 1: Standard X.XXX.XXX-X o X,XXX,XXX-X
-  for(const m of txt.matchAll(/(\d{1,2})[.,\s](\d{3})[.,\s](\d{3})[\s-]+(\d|[kK])/g)){
+  // (?<![\d.,]) al inicio: sin esto, en una tabla densa de montos con
+  // separador de miles ("127.753\n22.459\n105.294\n28.740.905-2") el motor de
+  // regex podía arrancar el match a mitad de un monto vecino (ej. "...59\n
+  // 105.294\n2..." como si fuera RUT), colando un RUT inventado (a veces con
+  // DV válido por azar) y de paso "comiéndose" el RUT real de la fila
+  // siguiente. Confirmado con datos reales: en el Libro de Remuneraciones de
+  // Antofagasta esto hacía perder ~15pp de cobertura contra la nómina
+  // (73.5% → 93.1% al agregar el límite de inicio).
+  for(const m of txt.matchAll(/(?<![\d.,])(\d{1,2})[.,\s](\d{3})[.,\s](\d{3})[\s-]+(\d|[kK])/g)){
     va_addRut(ruts,m[1]+m[2]+m[3]+'-'+m[4]);
   }
   // Pattern 2: XXXXXXXX-X sin separadores

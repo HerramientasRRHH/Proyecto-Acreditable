@@ -271,6 +271,59 @@ detalle integral.
 | Antofagasta | Liquidaciones y Libro en archivos SEPARADOS, divididos por letra de apellido (~24 archivos c/u); Contrato en archivo individual por trabajador (bundlea Contrato+Anexo Cargo+Anexo HHEE) | Física (Liq/Libro, requiere OCR) o QR con ambas partes juntas bajo el mismo encabezado (Contrato) | TODOS los activos, sin importar días — NO filtrar por `dias<30` acá | 100% escaneado, cero texto nativo — nómina ~350 trabajadores, volumen de páginas mucho mayor |
 | Vitacura | Contrato en slot propio (`va_validarContratosVitacura`); Libro sin IA todavía | — | — | Pendiente de auditar si se pide trabajar acá |
 
+## va_findAllRuts puede perder el RUT real Y colar uno inventado en tablas densas de montos
+
+Corriendo una revisión de prueba completa contra los 82 archivos reales de
+Antofagasta (ver "Trampas encontradas..." abajo para el resto), el Libro de
+Remuneraciones (`va_validarLibroRem`) daba solo 73.5% de cobertura contra la
+nómina — mucho peor que Previred (100%) leído con la misma función. La causa:
+el Patrón 1 de `va_findAllRuts` (RUT con puntos, sin ancla de inicio) es un
+regex sin límite de arranque, y en una tabla con VARIAS columnas de montos
+formateados con punto de miles justo antes de la columna RUT (ej.
+`"22.459\n105.294\n28.740.905-2\nAndia"`), el motor puede empezar a
+"leer RUT" a mitad de un monto vecino, produciendo un candidato falso — que
+además a veces pasa el dígito verificador chileno por pura casualidad (~1/11
+de las veces) y termina agregándose al set — y en el proceso consume los
+caracteres donde arrancaba el RUT real, perdiéndolo por completo (no es un
+falso negativo por OCR, es el propio regex "comiéndose" el match correcto).
+`va_addRut()` ya valida DV antes de aceptar un candidato, pero eso solo
+filtra los inventados que fallan el checksum — no rescata el RUT real que
+quedó tapado.
+
+Fix aplicado: anclar el inicio del Patrón 1 con `(?<![\d.,])` (no debe estar
+precedido por dígito, punto o coma) para forzar que el match arranque en un
+límite real de número, no a mitad de otro. Validado con los archivos reales:
+Libro de Remuneraciones subió de 73.5% a 93.1% de cobertura; Previred y
+F30-1 se mantuvieron exactamente igual (100% y 97.2%) — el fix solo saca
+falsos positivos/negativos, no toca ningún match que ya era válido.
+
+**Esto aplica a cualquier documento que junte una columna RUT con columnas de
+montos en pesos chilenos (formato punto de miles) sin separador robusto entre
+ellas** — no es exclusivo del Libro de Remuneraciones. Si un doc nuevo da una
+cobertura sorprendentemente baja contra la nómina real (y no es por OCR malo:
+`va_getPdfText` nativo, texto limpio), sospechá primero de este patrón antes
+de asumir que faltan archivos o que el documento está incompleto — probá el
+regex aislado contra un fragmento real con `re.finditer` y mirá los `span()`
+de cada match, no solo el resultado final.
+
+## Corriendo una auditoría de prueba completa: usa Python, no el navegador sandbox
+
+Se intentó correr `va_ejecutar()` completo en el navegador sandbox de Claude
+Code con los 82 archivos reales de Antofagasta (populando `va_docsData`
+directo vía `fetch()`+`File()`, sin pasar por los `<input>` del DOM). El
+OCR client-side (Tesseract.js) en ese entorno resultó >30s por página —
+a esa velocidad, las ~450 páginas solo de Liquidaciones habrían tardado
+horas. No se pudo confirmar si es una limitación del sandbox específicamente
+o representativa de hardware real, así que no lo tomes como señal de que el
+OCR del navegador esté roto — solo como que ese camino no sirve para probar
+rápido acá. Para una auditoría de prueba a escala completa, replicá la
+lógica en Python (como en el resto de este proceso) y corré los sweeps en
+background con `run_in_background` — MUCHO más rápido (pytesseract nativo)
+y permite hacer varios sweeps en paralelo mientras se revisan resultados.
+No se pudo probar el fallback a IA visual en este modo porque cargar la
+API key real en el navegador está bloqueado por el clasificador de permisos
+(manejo de credenciales) — quedó sin ejercitar esa parte del pipeline.
+
 ## Checklist por carpeta (A-M) no es solo "está/no está" — puede haber slots sin cablear
 
 Auditando Antofagasta carpeta por carpeta (letras A-M según la nomenclatura
