@@ -7612,35 +7612,18 @@ function rl_showPreviewCanvas(canvas, titulo){
     </div>
   </div>
 
-  <!-- Escaneo de documentos grandes -->
-  <div style="border:1.5px solid var(--borde);border-radius:8px;padding:12px 14px;margin-bottom:12px;background:#fafcfb">
-    <strong style="font-size:.78rem;color:var(--v)">📚 Escaneo profundo de documentos grandes (30–50 MB)</strong>
-    <p class="hint" style="margin:6px 0 10px">
-      Los libros de asistencia se leen <strong>página por página en el navegador</strong> liberando memoria en cada paso,
-      y se comprimen a evidencia estructurada antes de enviarse a la IA por lotes (map-reduce). Nunca se envía el PDF.
-    </p>
-    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      <select id="iav-bigdoc" style="padding:7px;border:1.5px solid var(--borde);border-radius:6px;font-size:.78rem">
-        <option value="libroasist">Libro de Asistencia</option>
-        <option value="sub_libroasist">Libro de Asistencia Subcontrato</option>
-        <option value="librorem">Libro de Remuneraciones</option>
-      </select>
-      <button class="btn btn-out btn-sm" id="iav-btn-scan" onclick="iav_escanearGrande()">🔬 Escanear documento grande</button>
-      <span id="iav-scan-status" style="font-size:.74rem;color:#888"></span>
-    </div>
-    <div class="pw" id="iav-scan-prog" style="display:none;margin-top:10px">
-      <div class="pb"><div class="pf" id="iav-scan-pf" style="width:0%"></div></div>
-      <div class="pt" id="iav-scan-pt">Iniciando…</div>
-    </div>
-    <div id="iav-scan-resumen" style="display:none;margin-top:10px;font-size:.75rem"></div>
-  </div>
-
-  <!-- "Analizar con IA" (informe/recomendaciones de texto sobre pasos 1-5) se
-  sacó a pedido del usuario: es un recurso separado para más adelante, sin
-  usar todavía. OJO: el panel de Configuración del motor IA de arriba NO se
-  tocó — de ahí sale la API key que usan va_iaLeerImagen/va_matchNombreNomina
-  para leer el Libro de Asistencia y la firma del Contrato (ver skill
-  acreditable-review). Las funciones iav_analizar/iav_verPayload/
+  <!-- "Escaneo de documentos grandes" (iav_escanearGrande, para el Libro de
+  Asistencia/Remuneraciones GRANDE y separado de Antofagasta/Vitacura) y
+  "Analizar con IA" (informe/recomendaciones de texto sobre pasos 1-5) se
+  sacaron a pedido del usuario: son recursos separados para más adelante,
+  sin usar todavía. Ninguno de los dos tiene relación con la lectura del
+  Libro/Contrato de Lo Barnechea que se ve en el Paso 5 (Resultados de
+  Validación) — esa la dispara va_ejecutar()/va_validarLiquidaciones(),
+  funciones completamente aparte. OJO: el panel de Configuración del motor
+  IA de arriba NO se tocó — de ahí sale la API key que usan
+  va_iaLeerImagen/va_matchNombreNomina para leer el Libro de Asistencia y
+  la firma del Contrato (ver skill acreditable-review). Las funciones
+  iav_escanearGrande/iav_analizar/iav_verPayload/
   iav_copiarInforme/iav_descargarInforme siguen definidas en el JS, solo sin
   botón que las dispare — reactivar es agregar de vuelta este bloque. -->
 </div>
