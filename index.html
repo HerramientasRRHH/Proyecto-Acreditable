@@ -10824,6 +10824,43 @@ function va_matchRutCercano(rutCandidato,listaValidos){
   return mejor;
 }
 
+// ── OCR de página completa probando 0°/180° y quedándose con la mejor ──
+// Hallazgo real (Antofagasta, Licencias Médicas): algunas páginas del PDF
+// están físicamente escaneadas boca abajo — page.rotation del PDF da 0 (no
+// hay flag de rotación), pero el contenido en sí está al revés, así que un
+// OCR normal da texto irreconocible (espejado/invertido). Probar ambas
+// orientaciones y quedarse con la que tenga más coincidencias de fecha/
+// palabras clave es más robusto que asumir que todo el documento viene
+// bien orientado.
+async function va_ocrPaginaMejorRotacion(page,scale){
+  scale=scale||2.5;
+  if(!ren_ocrWorker)return '';
+  try{
+    const vp=page.getViewport({scale});
+    const canvas=document.createElement('canvas');
+    canvas.width=vp.width;canvas.height=vp.height;
+    await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+    let mejorTxt='',mejorScore=-1;
+    for(const angulo of [0,180]){
+      let cv=canvas;
+      if(angulo){
+        cv=document.createElement('canvas');
+        cv.width=canvas.width;cv.height=canvas.height;
+        const rctx=cv.getContext('2d');
+        rctx.translate(cv.width,cv.height);rctx.rotate(Math.PI);
+        rctx.drawImage(canvas,0,0);
+      }
+      try{
+        const blob=await new Promise(res=>cv.toBlob(res,'image/png'));
+        const {data:{text}}=await ren_ocrWorker.recognize(blob);
+        const score=(text.match(/20\d\d/g)||[]).length+(text.match(/Documento|N[uú]mero|Nombre/gi)||[]).length;
+        if(score>mejorScore){mejorScore=score;mejorTxt=text;}
+      }catch(e){console.warn('OCR rotación '+angulo+'°:',e);}
+    }
+    return mejorTxt;
+  }catch(e){console.warn('va_ocrPaginaMejorRotacion:',e);return '';}
+}
+
 // ── OCR de respaldo para el RUN de Licencia Médica (formulario Minsal/licencia.cl) ──
 // SOLO se usa cuando la página no tiene texto embebido suficiente (escaneada/en papel).
 // Recorta la fila "A.1 IDENTIFICACIÓN DEL TRABAJADOR", que está en la misma posición
@@ -11840,6 +11877,22 @@ async function va_validarFiniquitos(){
 }
 
 // ── 4.2b LICENCIAS MÉDICAS ──
+// Fila de un LISTADO tabular de licencias (formato real visto en Antofagasta:
+// "Listado de licencia médica del mes de X" — una tabla de varias páginas con
+// N°/RUT/Nombre/Fecha Inicio/Fecha Término/Días por fila, distinto del
+// formulario individual Minsal que asume el resto de esta función). Esta
+// tabla sola ya trae RUT+fechas+días completos por licencia, así que no hace
+// falta además leer los comprobantes de respaldo individuales que suelen
+// venir después en el mismo PDF — el regex simplemente no matchea nada en
+// esas páginas (formato distinto) y no molesta.
+const VA_LIC_TABLA_ROW_RE=/(\d{1,2}\.?\d{3}\.?\d{3}-[\dkK])\s+([A-Za-zÁÉÍÓÚÑñáéíóú][A-Za-zÁÉÍÓÚÑñáéíóú\s]{4,45}?)\s+(\d{1,2}-\d{1,2}-\d{4})\s+(\d{1,2}-\d{1,2}-\d{4})\s+(\d{1,3})\b/g;
+function va_parseFechaDDMMYYYY(s){
+  const p=s.split('-');
+  if(p.length!==3)return null;
+  const d=new Date(parseInt(p[2],10),parseInt(p[1],10)-1,parseInt(p[0],10));
+  return isNaN(d.getTime())?null:d;
+}
+
 async function va_validarLicenciasMedicas(){
   va_licMedRuts=new Set();
   va_licMedDiasPorRut=new Map();
@@ -11854,8 +11907,33 @@ async function va_validarLicenciasMedicas(){
     for(let p=1;p<=pdf.numPages;p++){
       const page=await pdf.getPage(p);
       const tc=await page.getTextContent();
-      const txt=tc.items.map(x=>x.str).join(' ');
-      const txtLen=txt.replace(/\s/g,'').length;
+      let txt=tc.items.map(x=>x.str).join(' ');
+      let txtLen=txt.replace(/\s/g,'').length;
+      // Página escaneada: OCR de página completa probando ambas rotaciones
+      // (ver va_ocrPaginaMejorRotacion) ANTES de intentar nada más — a
+      // diferencia del formulario Minsal individual, el listado tabular
+      // necesita el texto de la página entera, no solo un recorte del RUN.
+      if(txtLen<40){
+        const ocrTxt=await va_ocrPaginaMejorRotacion(page);
+        if(ocrTxt&&ocrTxt.replace(/\s/g,'').length>txtLen){txt=ocrTxt;txtLen=txt.replace(/\s/g,'').length;}
+      }
+      // 1) ¿Es una página del listado tabular? (varias filas RUT+fechas+días)
+      const filasTabla=[...txt.matchAll(VA_LIC_TABLA_ROW_RE)];
+      for(const fila of filasTabla){
+        const rutFila=va_normRut(fila[1]);
+        if(!lhRutSet.has(rutFila))continue;
+        va_licMedRuts.add(rutFila);
+        if(va_periodoMes&&va_periodoAnio){
+          const fechaInicio=va_parseFechaDDMMYYYY(fila[3]);
+          const dias=parseInt(fila[5],10);
+          if(fechaInicio&&dias){
+            const dEnPeriodo=va_diasLicenciaEnPeriodo(fechaInicio,dias,va_periodoMes,va_periodoAnio);
+            if(dEnPeriodo!=null)va_licMedDiasPorRut.set(rutFila,(va_licMedDiasPorRut.get(rutFila)||0)+dEnPeriodo);
+          }
+        }
+      }
+      if(filasTabla.length)continue; // ya se sacó todo lo útil de esta página
+      // 2) Formulario individual (Minsal u otro) — comportamiento original
       const encontrados=va_findAllRuts(txt);
       encontrados.forEach(r=>va_licMedRuts.add(r));
       const rutMatchLH=[...encontrados].find(r=>lhRutSet.has(r));
