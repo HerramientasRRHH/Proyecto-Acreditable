@@ -10579,6 +10579,7 @@ const VA_BASES={
       {id:'cartanofirma',label:'Carta No Firma',icon:'✉',accept:'.pdf',multi:false,tip:'Justifica liquidaciones sin firma'},
       {id:'librorem',label:'I · Libro Remuneraciones',icon:'📘',accept:'.pdf',multi:false,tip:'PDF tabular de remuneraciones'},
       {id:'libroasist',label:'J · Libro Asistencia',icon:'📅',accept:'.pdf',multi:true,tip:'PDF(s) escaneado(s) — uno por letra o el unificado — requiere OCR'},
+      {id:'libroasist_carta',label:'J · Carta Fe de Erratas',icon:'📝',accept:'.pdf,.docx',multi:false,tip:'Opcional — explica correcciones/anotaciones del Libro (RUT + motivo)'},
       {id:'mujeres',label:'K · Acreditación Mujeres',icon:'👩',accept:'.pdf,.xlsx,.xls',multi:false,tip:'Listado/nómina de mujeres'},
       {id:'discapacidad',label:'K · Personal Discapacitado',icon:'♿',accept:'.pdf',multi:false,tip:'Listado + certificados'},
       {id:'licencias',label:'M · Licencias Médicas',icon:'🏥',accept:'.pdf',multi:true,tip:'Listado + licencias'}]},
@@ -11192,6 +11193,27 @@ async function va_getPdfText(buf){
   return allText;
 }
 
+// ── EXTRACT DOCX TEXT (cartas explicativas en Word, ej. Fe de Erratas) ──
+async function va_readDocxText(buf){
+  try{
+    const zip=await JSZip.loadAsync(buf);
+    const f=zip.file('word/document.xml');
+    if(!f)return '';
+    const xml=await f.async('string');
+    // Extraer runs de texto <w:t>...</w:t> preservando un salto de linea por
+    // cada fin de FILA de tabla (</w:tr>) — no por parrafo/celda, para que el
+    // nombre+RUT+motivo de una misma fila queden en la misma linea. El
+    // marcador va DENTRO del texto (\x01) para que matchAll lo capture en el
+    // mismo orden que los <w:t>.
+    const withBreaks=xml.split('</w:tr>').join('\x01');
+    const parts=[];
+    for(const m of withBreaks.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>|\x01/g)){
+      parts.push(m[1]!==undefined?m[1]:'\n');
+    }
+    return parts.join(' ').replace(/ *\n */g,'\n').replace(/&amp;/g,'&');
+  }catch(e){console.warn('DOCX read error:',e);return '';}
+}
+
 // ── EXTRACT PDF TEXT con OCR fallback (para docs escaneados) ──
 async function va_getPdfTextOCR(buf){
   let allText='';
@@ -11348,6 +11370,11 @@ async function va_validarLiquidaciones(){
         const esRenunciaText = /renuncia\s+voluntaria/i.test(txt) && /c[eé]dula\s+de\s+identidad/i.test(txt);
         const esCartaDTText = /Comprobante\s+de\s+Carta\s+de\s+Aviso/i.test(txt);
         const esCartaExpText = /se[nñ]or\s+ilustre\s+municipalidad/i.test(txt) || /aclaraci[oó]n\s+libro/i.test(txt);
+        // Carta explicativa de NO firma de liquidación (motivo: vacaciones, desvinculación, etc.)
+        // Real (Antofagasta): tanto suelta ("no firmo su liquidación de sueldo del mes de
+        // mayo, debido que...vacaciones") como intercalada tras cada liquidación dentro del
+        // mismo PDF por letra ("no firmaron su liquidación..." — plural, uno o más RUT).
+        const esCartaNoFirmaLiqText = /no\s+firm\w*\s+su\s+liquidaci[oó]n/i.test(txt);
         const esReglamentoText = /reglamento\s+interno/i.test(txt) && /derecho\s+a\s+saber/i.test(txt);
         const esLibroText = /Libro\s+de\s+Asistencia|Registro\s+de\s+Asistencia|Control\s+de\s+Asistencia/i.test(txt);
         // Constancia de la Dirección del Trabajo: reemplaza la firma del Contrato
@@ -11574,6 +11601,7 @@ async function va_validarLiquidaciones(){
         const esCartaDT = esCartaDTText || /comprobante\s+de\s+carta\s+de\s+aviso/i.test(txt);
         const esCartaExp = esCartaExpText
           || /se[nñ]or\s+ilustre\s+municipalidad/i.test(txt) || /aclaraci[oó]n\s+libro/i.test(txt);
+        const esCartaNoFirmaLiq = esCartaNoFirmaLiqText;
 
         // ── CAPTURA DE THUMBNAIL PARA SIN_FIRMA ──
         let liqThumbForReview = null;
@@ -11609,7 +11637,7 @@ async function va_validarLiquidaciones(){
         const rut=currentRut;
         if(!rut)continue;
         if(!va_liqMap.has(rut)) va_liqMap.set(rut,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
-          tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false});
+          tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false,tieneCartaNoFirmaLiq:false});
         const w=va_liqMap.get(rut);
         if(esLiq){w.tieneLiq=true;
           const mD=txt.match(/D[ií]as\s+Trabajados\s*[:\s]*(\d+)/i);if(mD)w.dias=parseInt(mD[1]);
@@ -11653,7 +11681,7 @@ async function va_validarLiquidaciones(){
             if(matchLibro){
               const rutLibro=matchLibro.rutNorm;
               if(!va_liqMap.has(rutLibro)) va_liqMap.set(rutLibro,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
-                tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false});
+                tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false,tieneCartaNoFirmaLiq:false});
               const wLibro=va_liqMap.get(rutLibro);
               wLibro.tieneLibro=true;
               if(libroNotasIA) wLibro.libroNotasIA=((wLibro.libroNotasIA?wLibro.libroNotasIA+' | ':'')+libroNotasIA);
@@ -11688,7 +11716,7 @@ async function va_validarLiquidaciones(){
             if(matchLic){
               const rutLic=matchLic.rutNorm;
               if(!va_liqMap.has(rutLic)) va_liqMap.set(rutLic,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
-                tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false});
+                tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false,tieneCartaNoFirmaLiq:false});
               wLic=va_liqMap.get(rutLic);
             }
           } else {
@@ -11787,6 +11815,19 @@ async function va_validarLiquidaciones(){
           }
         }
         if(esRenuncia || esCartaDT || esCartaExp) w.tieneCartaDT = true;
+        if(esCartaNoFirmaLiq){
+          w.tieneCartaNoFirmaLiq = true;
+          // La carta puede nombrar a más de un trabajador en la misma página
+          // ("los trabajadores que no firmaron...") — marcar a todos los RUT
+          // mencionados que pertenezcan a la nómina, no solo al currentRut.
+          for(const r of pageRuts){
+            if(r===rut)continue;
+            if(!va_lhFiltered.some(x=>x.rutNorm===r))continue;
+            if(!va_liqMap.has(r)) va_liqMap.set(r,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
+              tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false,tieneCartaNoFirmaLiq:false});
+            va_liqMap.get(r).tieneCartaNoFirmaLiq=true;
+          }
+        }
         if(liqThumbForReview && !w.liqThumbImg) w.liqThumbImg = liqThumbForReview;
         // Red de seguridad: página escaneada (poco texto, ni por OCR normal se detectó
         // nada) — intentamos leer el RUN recortado con checksum antes de darla por
@@ -11797,7 +11838,7 @@ async function va_validarLiquidaciones(){
           const rutValidado=va_extraerRutConChecksum(runTxt,new Set(va_lhFiltered.map(x=>x.rutNorm)));
           if(rutValidado){
             if(!va_liqMap.has(rutValidado)) va_liqMap.set(rutValidado,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
-              tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false});
+              tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false,tieneCartaNoFirmaLiq:false});
             va_liqMap.get(rutValidado).tieneLicMed=true;
           }
         }
@@ -12314,6 +12355,15 @@ function va_clasificar(t,liq){
     }else{
       r.docsReq.push('Comprobante de pago');
       if(liq.tieneComprobante)r.docsOk.push('Comprobante');else r.docsFalt.push('Comprobante de pago');
+      if(va_baseKey==='Antofagasta'){
+        // Dos vías: intercalada/incluida dentro de las liquidaciones (detectada
+        // inline por va_validarLiquidaciones) o subida aparte en el slot dedicado
+        // 'Carta No Firma' (va_validarCartaNoFirma) — cualquiera de las dos vale.
+        const cartaSlotRuts=va_docResults['cartanofirma']&&va_docResults['cartanofirma'].cartaRuts;
+        const enCartaSlot=cartaSlotRuts&&cartaSlotRuts.has(t.rutNorm);
+        r.docsReq.push('Carta explicativa (motivo no firma)');
+        if(liq.tieneCartaNoFirmaLiq||enCartaSlot)r.docsOk.push('Carta explicativa');else r.docsFalt.push('Carta explicativa (motivo no firma)');
+      }
     }
     return r;
   }
@@ -12848,7 +12898,7 @@ async function va_validarLibroAsist(){
         if(fuente==='OCR')viaOCR++;else viaIA++;
         const rutM=matchWorker.rutNorm;
         if(!va_liqMap.has(rutM))va_liqMap.set(rutM,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
-          tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false});
+          tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false,tieneCartaNoFirmaLiq:false});
         va_liqMap.get(rutM).tieneLibro=true;
         identificados.add(rutM);
         va_iaAuditLog.push({modulo:'Libro de Asistencia (Antofagasta)',pagina:totalPags,tipo:'LIBRO_ASISTENCIA',
@@ -12868,6 +12918,35 @@ async function va_validarLibroAsist(){
     faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre})),
     estado:faltantes.length===0?'✅':(faltantes.length<=Math.round(esperados*0.1)?'⚠':'❌'),
     nota:`${totalPags} páginas · ${identificados.size}/${esperados} trabajadores identificados (${viaOCR} por OCR, ${viaIA} por IA, ${sinIdentificar} páginas sin identificar)`};
+
+  // ── Carta Fe de Erratas: explica anotaciones/correcciones manuscritas del Libro ──
+  // Real (Antofagasta): tabla N° / NOMBRE / RUT / Caso ("Por error firme el día
+  // X en la tarde", etc.) — se apoya en el detalle para que quien revisa pueda
+  // cruzar cada anotación del Libro físico contra su explicación en la carta.
+  const ddCarta=va_docsData['libroasist_carta'];
+  const carta={cargada:false,filas:[],rutsEnCarta:new Set()};
+  if(ddCarta&&ddCarta.buffers&&ddCarta.buffers.length){
+    carta.cargada=true;
+    const buf=ddCarta.buffers[0];
+    const esDocx=ddCarta.files[0]&&/\.docx$/i.test(ddCarta.files[0].name);
+    const txtCarta=esDocx?await va_readDocxText(buf):await va_getPdfTextOCR(buf,40);
+    carta.filas=va_parseCartaFeErratas(txtCarta);
+    carta.filas.forEach(f=>carta.rutsEnCarta.add(f.rut));
+  }
+  va_docResults['libroasist'].carta=carta;
+}
+// Parsea la tabla de la carta Fe de Erratas: una fila por trabajador con RUT
+// y la descripción de su corrección/anotación.
+function va_parseCartaFeErratas(txt){
+  const filas=[];
+  for(const lineaRaw of txt.split('\n')){
+    const linea=lineaRaw.trim().replace(/\s+/g,' ');
+    if(!linea)continue;
+    const ruts=va_findAllRuts(linea);
+    if(!ruts.size)continue;
+    filas.push({rut:[...ruts][0],texto:linea});
+  }
+  return filas;
 }
 
 // ── Mujeres ──
@@ -14216,6 +14295,22 @@ function va_renderAntofagastaLibroDetalle(){
     h+='</tbody></table>';
   }else{
     h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los trabajadores tienen Libro identificado</div>';
+  }
+  // Carta Fe de Erratas: correcciones/anotaciones manuscritas del Libro, explicadas por escrito
+  if(d.carta&&d.carta.cargada){
+    h+=`<div class="ch-section-title" style="margin-top:16px">📝 Carta Fe de Erratas — ${d.carta.filas.length} corrección(es) explicada(s)</div>`;
+    if(d.carta.filas.length){
+      h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Detalle de la corrección</th></tr></thead><tbody>';
+      d.carta.filas.forEach(f=>{h+=`<tr><td style="font-size:.7rem;white-space:nowrap">${f.rut}</td><td style="font-size:.72rem">${f.texto}</td></tr>`;});
+      h+='</tbody></table>';
+    }else{
+      h+='<div style="color:#a07900;font-size:.78rem">⚠ Carta cargada pero no se pudo extraer ninguna fila con RUT — revisar formato manualmente.</div>';
+    }
+    h+='<div style="font-size:.7rem;color:#666;margin-top:4px">Cruza cada RUT contra la anotación manuscrita real del Libro físico para confirmar que la carta explica correctamente lo escrito.</div>';
+  }else{
+    h+=`<div style="background:#fffbea;border:1px solid #f0d060;border-radius:8px;padding:8px 14px;font-size:.78rem;color:#a07900;margin-top:16px">
+      ℹ Si el Libro tiene anotaciones/correcciones manuscritas al pie, carga la <strong>Carta Fe de Erratas</strong> (J) para justificarlas.
+    </div>`;
   }
   h+=va_renderIAAuditSection('Libro de Asistencia (Antofagasta)');
   return h;

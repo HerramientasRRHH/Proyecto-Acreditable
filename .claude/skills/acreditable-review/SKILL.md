@@ -271,6 +271,65 @@ detalle integral.
 | Antofagasta | Liquidaciones y Libro en archivos SEPARADOS, divididos por letra de apellido (~24 archivos c/u); Contrato en archivo individual por trabajador (bundlea Contrato+Anexo Cargo+Anexo HHEE) | Física (Liq/Libro, requiere OCR) o QR con ambas partes juntas bajo el mismo encabezado (Contrato) | TODOS los activos, sin importar días — NO filtrar por `dias<30` acá | 100% escaneado, cero texto nativo — nómina ~350 trabajadores, volumen de páginas mucho mayor |
 | Vitacura | Contrato en slot propio (`va_validarContratosVitacura`); Libro sin IA todavía | — | — | Pendiente de auditar si se pide trabajar acá |
 
+## Checklist por carpeta (A-M) no es solo "está/no está" — puede haber slots sin cablear
+
+Auditando Antofagasta carpeta por carpeta (letras A-M según la nomenclatura
+real de carpetas del usuario) salieron hallazgos que vale la pena dejar
+documentados porque el patrón se va a repetir:
+
+- **No todas las carpetas del cliente corresponden a un documento de RRHH.**
+  A) Carta solicitud estado de pago, B) Factura, C) OC (Portal Mercado
+  Público), D) Autorización Estado de Pago, L) Comprobante pago de multas son
+  documentación de pago/facturación municipal, no de cumplimiento laboral —
+  confirmado con el usuario ("eso no lo integres no aplica a RRHH"). No les
+  busques slot ni función de validación.
+- **Un doc "sin auditar todavía" puede ya estar bien resuelto por una función
+  genérica compartida.** Previred de Antofagasta (73 pág, texto nativo) ya
+  pasaba al 100% (352/352 RUT) por `va_validarCruceDoc('previred',...)`
+  — la misma función que usa Lo Barnechea, corrida sin condicional de base.
+  Antes de escribir lógica nueva para un doc, confirmá con datos reales que
+  la función genérica compartida ya no lo resuelve.
+- **Puede existir un slot Y su función de lectura, sin estar cableados al
+  resultado final.** El slot `cartanofirma` (label "Carta No Firma") y
+  `va_validarCartaNoFirma()` ya extraían los RUT de la carta a
+  `va_docResults['cartanofirma'].cartaRuts` — pero `va_clasificar()` nunca lo
+  leía, así que no bajaba el estado SIN_FIRMA de nadie. Grepeá el nombre del
+  slot/función en TODO el archivo antes de asumir que hace falta escribir
+  algo desde cero — puede que solo falte una línea de cruce.
+- **Un "carta explicativa" real puede venir intercalada DENTRO del mismo PDF
+  que documenta, no solo como archivo aparte.** En Liquidaciones de
+  Antofagasta, la página "no firmó su liquidación... debido a vacaciones"
+  aparece tanto en un PDF separado (`cartas explicativas de vacaciones.pdf`)
+  como pegada justo después de la liquidación del mismo trabajador dentro del
+  PDF por letra — el detector tiene que buscar el patrón de texto en
+  CUALQUIER página del slot compartido (acá `liq`), no asumir que vive en un
+  archivo dedicado. Regex usado: `/no\s+firm\w*\s+su\s+liquidaci[oó]n/i`
+  (`\w*` para cubrir firmo/firmó/firma/firmaron sin perseguir cada conjugación).
+- **Los slots "carta explicativa" son baratos de sumar por comprobante Y por
+  carta — no asumas que un doc sin firma solo necesita el comprobante.**
+  Pedido explícito del usuario: liquidación sin firma en Antofagasta exige
+  comprobante de pago (ya existía, `esComprobanteText`/`tieneComprobante`) Y
+  carta explicativa del motivo (nuevo, `tieneCartaNoFirmaLiq`) — las dos
+  vías (inline en `liq` o slot dedicado `cartanofirma`) cuentan como válidas.
+- **Un archivo .docx real (no .pdf) puede ser la única forma en que llega una
+  carta explicativa** (ej. "carta explicativa Fe de Erratas.docx" del Libro
+  de Asistencia — tabla N°/Nombre/RUT/Caso con la descripción de cada
+  corrección manuscrita). La librería `docx@8.5.0` ya cargada en el proyecto
+  es solo para ESCRIBIR Word, no sirve para leer — pero `JSZip` (también ya
+  cargada) sí permite leerlo: un .docx es un .zip con `word/document.xml`
+  adentro, y el texto vive en tags `<w:t>`. Ver `va_readDocxText()`. Al
+  reconstruir texto con saltos de línea por fila de tabla, cortá SOLO en
+  `</w:tr>` (fin de fila) — cortar también en `</w:p>` (fin de párrafo/celda)
+  rompe cada fila en fragmentos de una sola celda ("9 Alballay..." queda
+  separado de su propio RUT). Validado contra el archivo real: 18/18 filas
+  extraídas con RUT + nombre + motivo correctos.
+- **No hay forma automática de saber si una página del Libro TIENE una
+  anotación manuscrita al pie** sin visión (no hay heurística de texto/OCR
+  confiable para eso) — el alcance honesto es: leer y mostrar la carta
+  explicativa (RUT + motivo) al lado del módulo del Libro para que quien
+  revisa cruce manualmente contra el cuaderno físico, no prometer un cruce
+  automático que no se puede validar con lo que hay hoy.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
