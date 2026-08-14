@@ -10607,6 +10607,12 @@ let va_lhAll=[],va_lhFiltered=[],va_baseKey=null,va_sectorKey=null,va_subarea=nu
 let va_licMedDiasPorRut=new Map(); // rutNorm -> días de licencia que caen en el mes auditado, según el documento
 let va_docsData={},va_liqMap=new Map(),va_resultados=[],va_docResults={},va_subtabActiva='liq';
 let va_iaDiag=null; // {configurada,paginasOk,paginasError} — diagnóstico de conexión IA, no "uso de tokens"
+// Log detallado de cada lectura con IA + veredicto de matching, para poder
+// ver DENTRO de la app por qué algo quedó "faltante" (¿la IA nunca leyó la
+// página? ¿leyó pero el nombre no matcheó? ¿matcheó bien?) sin tener que
+// reproducir el llamado a mano con scripts cada vez — ver skill
+// acreditable-review para el proceso que esto reemplaza/acelera.
+let va_iaAuditLog=[]; // {modulo,pagina,tipo,nombreLeido,rutLeido,resultado,atribuidoA,motivo}
 let va_periodoMes=null,va_periodoAnio=null; // Fix 1: periodo extraído del LH
 
 // ── HELPERS ──
@@ -11621,6 +11627,10 @@ async function va_validarLiquidaciones(){
             // nómina, no se le atribuye a nadie: mejor no encontrar nada que
             // atribuírselo al trabajador equivocado.
             const matchLibro=va_matchNombreNomina(libroNombreIA,va_lhFiltered);
+            va_iaAuditLog.push({modulo:'Libro de Asistencia',pagina:p,tipo:'LIBRO_ASISTENCIA',
+              nombreLeido:libroNombreIA,resultado:matchLibro?'match':'sin_match',
+              atribuidoA:matchLibro?matchLibro.nombre:null,
+              motivo:matchLibro?null:'nombre leído no coincide con ningún trabajador de la nómina'});
             if(matchLibro){
               const rutLibro=matchLibro.rutNorm;
               if(!va_liqMap.has(rutLibro)) va_liqMap.set(rutLibro,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
@@ -11652,6 +11662,10 @@ async function va_validarLiquidaciones(){
           let wLic=null;
           if(licMedIA.nombre){
             const matchLic=va_matchNombreNomina(licMedIA.nombre,va_lhFiltered);
+            va_iaAuditLog.push({modulo:'Licencia Médica (inline)',pagina:p,tipo:'LICENCIA_MEDICA',
+              nombreLeido:licMedIA.nombre,resultado:matchLic?'match':'sin_match',
+              atribuidoA:matchLic?matchLic.nombre:null,
+              motivo:matchLic?null:'nombre leído no coincide con ningún trabajador de la nómina'});
             if(matchLic){
               const rutLic=matchLic.rutNorm;
               if(!va_liqMap.has(rutLic)) va_liqMap.set(rutLic,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
@@ -11718,6 +11732,9 @@ async function va_validarLiquidaciones(){
             const nombreFirmante=(qm[1]||'').trim();
             if(!nombreFirmante)continue;
             const esElTrabajador=va_coberturaTokens(va_tokensNombre(nombreFirmante),va_tokensNombre(w.nombre))>=0.6;
+            va_iaAuditLog.push({modulo:'Contrato (firma QR)',pagina:p,tipo:'FIRMA_QR',
+              nombreLeido:nombreFirmante,resultado:esElTrabajador?'firma_trabajador':'firma_empleador',
+              atribuidoA:w.nombre,motivo:esElTrabajador?null:'no coincide con el trabajador rastreado — se asume firma del empleador'});
             if(esElTrabajador)w.contratoFirmaTrabajador=true;
             else w.contratoFirmaEmpleador=true;
           }
@@ -11949,7 +11966,15 @@ async function va_validarExenciones(){
         const leido=await va_iaLeerNombreRut(page,'Este es un formulario chileno de Exención de Cotizar AFP.');
         if(leido&&leido.nombre){
           const match=va_matchNombreNomina(leido.nombre,jubLH);
+          va_iaAuditLog.push({modulo:'Exención Cotizar',pagina:p,tipo:'EXENCION_AFP',
+            nombreLeido:leido.nombre,rutLeido:leido.rut||null,resultado:match?'match':'sin_match',
+            atribuidoA:match?match.nombre:null,
+            motivo:match?null:'nombre leído no coincide con ningún jubilado de la nómina'});
           if(match)va_addRut(ruts,match.rutNorm);
+        }else if(leido){
+          va_iaAuditLog.push({modulo:'Exención Cotizar',pagina:p,tipo:'EXENCION_AFP',
+            nombreLeido:null,resultado:'sin_lectura',atribuidoA:null,
+            motivo:'la IA no identificó ningún nombre en la página'});
         }
       }
     }
@@ -13068,7 +13093,7 @@ async function va_ejecutar(){
   if(!va_lhFiltered.length){toast('Selecciona base y sector');return;}
   document.getElementById('va-prog').style.display='block';
   document.getElementById('va-card-result').style.display='none';
-  va_resultados=[];va_docResults={};
+  va_resultados=[];va_docResults={};va_iaAuditLog=[];
   // Helper para progreso con página actual
   const setPg=(p,msg,extra='')=>{
     va_setProg(p,msg);
@@ -13163,12 +13188,14 @@ function va_renderResultados(){
   if(basesConLicEnLiqTabs.includes(va_baseKey)){baseTabs.push('libro');}
   if(va_baseKey==='Antofagasta'){baseTabs.push('imput','jubilados','anexos','cartanofirma','librorem','libroasist','mujeres','discapacidad');}
   if(va_baseKey==='Vitacura'){baseTabs.push('contratos','nominas','epp','libroasist','subcontrato');}
+  if(va_iaAuditLog.length){baseTabs.push('iadiag');}
   const tabs=baseTabs;
   const tabLabels={liq:'📄 Liquidaciones',finiq:'📑 Finiquitos',licencias:'🏥 Lic. Médicas',exencion:'👴 Exenciones',f30:'📋 F30',f301:'📋 F30-1',previred:'💰 PreviRed',
     libro:'📅 Libro Asistencia',
     imput:'📊 IMPUT',jubilados:'👴 Jubilados',anexos:'🔁 Reemplazos',cartanofirma:'✉ Carta NoFirma',
     librorem:'📘 Libro Rem.',libroasist:'📅 Libro Asist.',mujeres:'👩 Mujeres',discapacidad:'♿ Discapacidad',
-    nominas:'📊 Nóminas',epp:'🦺 EPP',subcontrato:'🏢 O · Subcontrato',contratos:'📝 Contratos'};
+    nominas:'📊 Nóminas',epp:'🦺 EPP',subcontrato:'🏢 O · Subcontrato',contratos:'📝 Contratos',
+    iadiag:'🔍 IA Detalle'};
   document.getElementById('va-subtabs').innerHTML=tabs.map(t=>
     `<button class="ch-stab${va_subtabActiva===t?' active':''}" data-vstab="${t}" onclick="va_subtab('${t}')">${tabLabels[t]||t}</button>`
   ).join('');
@@ -13195,6 +13222,7 @@ function va_subtab(tab){
   else if(tab==='epp') c.innerHTML=va_renderEPP();
   else if(tab==='subcontrato') c.innerHTML=va_renderSubcontrato();
   else if(tab==='contratos'&&va_baseKey==='Vitacura') c.innerHTML=va_renderContratosVitacura();
+  else if(tab==='iadiag') c.innerHTML=va_renderIADiag();
   else c.innerHTML=va_renderCruceTab(tab);
 }
 
@@ -13525,12 +13553,54 @@ function va_renderExencion(){
     <div class="ch-kpi ok"><div class="v">${d.cubiertos}</div><div class="l">Cubiertos</div></div>
     <div class="ch-kpi${d.faltantes.length?' err':''}"><div class="v">${d.faltantes.length}</div><div class="l">Faltantes</div></div>
   </div>`;
+  if(d.paginasIA){
+    h+=`<div style="background:#f2f7ff;border:1px solid #cfe0f5;border-radius:7px;padding:6px 12px;margin-bottom:10px;font-size:.72rem;color:#375;display:inline-block">🔧 ${d.paginasIA} página(s) sin RUT reconocible se verificaron con IA visual (ver pestaña 🔍 IA Detalle)</div><br>`;
+  }
   if(d.faltantes.length){
     h+='<div class="ch-section-title" style="color:#c0392b">⚠ Jubilados en LH sin exención en PDF</div>';
     h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th></tr></thead><tbody>';
     [...d.faltantes].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{h+=`<tr><td>${f.rut}</td><td>${f.nombre}</td></tr>`;});
     h+='</tbody></table>';
   }else{h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los jubilados del LH tienen exención</div>';}
+  return h;
+}
+
+// ── Diagnóstico IA detallado ──
+// Muestra, por cada página que la IA procesó (Libro, Licencia inline, firma
+// de Contrato, Exención Cotizar), qué leyó exactamente y si el matching le
+// atribuyó a alguien o lo rechazó — para ver directo en la app POR QUÉ algo
+// quedó "faltante" sin tener que reproducirlo con scripts aparte. Ver skill
+// acreditable-review para el proceso manual que esto reemplaza/acelera.
+function va_renderIADiag(){
+  if(!va_iaAuditLog.length) return '<div class="ch-empty"><div class="ico">🔍</div>Esta corrida no generó lecturas con IA (¿motor IA no configurado, o ninguna página ambigua?)</div>';
+  const total=va_iaAuditLog.length;
+  const matches=va_iaAuditLog.filter(x=>x.resultado==='match'||x.resultado==='firma_trabajador'||x.resultado==='firma_empleador').length;
+  const sinMatch=va_iaAuditLog.filter(x=>x.resultado==='sin_match').length;
+  const sinLectura=va_iaAuditLog.filter(x=>x.resultado==='sin_lectura').length;
+  let h=`<div style="background:#eaf6ef;border-radius:7px;padding:10px 14px;font-size:.78rem;margin-bottom:10px">ℹ Cada fila es una página que la IA leyó como parte de esta corrida. "Sin match" significa que la IA SÍ leyó un nombre pero no coincide con nadie de la nómina — revisar la página real antes de asumir que el documento falta.</div>`;
+  h+=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">
+    <div class="ch-kpi"><div class="v">${total}</div><div class="l">Páginas leídas</div></div>
+    <div class="ch-kpi ok"><div class="v">${matches}</div><div class="l">✅ Atribuidas</div></div>
+    <div class="ch-kpi${sinMatch?' warn':''}"><div class="v">${sinMatch}</div><div class="l">⚠ Sin match</div></div>
+    <div class="ch-kpi${sinLectura?' warn':''}"><div class="v">${sinLectura}</div><div class="l">⚠ Sin lectura</div></div>
+  </div>`;
+  const porModulo=new Map();
+  for(const e of va_iaAuditLog){
+    if(!porModulo.has(e.modulo)) porModulo.set(e.modulo,[]);
+    porModulo.get(e.modulo).push(e);
+  }
+  const iconos={match:'✅',firma_trabajador:'✅ (trabajador)',firma_empleador:'✅ (empleador)',sin_match:'⚠',sin_lectura:'⚠'};
+  for(const [modulo,entradas] of porModulo){
+    h+=`<div class="ch-section-title" style="margin-top:16px">${modulo} — ${entradas.length} página(s)</div>`;
+    h+='<table class="ch-tbl"><thead><tr><th></th><th>Pág.</th><th>Nombre leído por la IA</th><th>Resultado</th><th>Motivo / atribuido a</th></tr></thead><tbody>';
+    [...entradas].sort((a,b)=>a.pagina-b.pagina).forEach(e=>{
+      h+=`<tr><td>${iconos[e.resultado]||e.resultado}</td><td>${e.pagina}</td>`+
+        `<td style="font-size:.72rem">${e.nombreLeido||'<span style="color:#999">—</span>'}</td>`+
+        `<td style="font-size:.72rem">${e.resultado}</td>`+
+        `<td style="font-size:.72rem">${e.atribuidoA?('→ '+e.atribuidoA):(e.motivo||'')}</td></tr>`;
+    });
+    h+='</tbody></table>';
+  }
   return h;
 }
 
