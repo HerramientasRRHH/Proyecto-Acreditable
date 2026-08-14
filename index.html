@@ -12579,6 +12579,56 @@ async function va_validarCartaNoFirma(){
 // columnas correctamente en la mayoría de los casos (texto impreso limpio,
 // no manuscrito) — solo se usa IA si una página no tiene NINGÚN firmante
 // legible por OCR.
+// Cada archivo debe contener estos 3 documentos (confirmado por el usuario:
+// "en Contrato son estos 3 documentos por nuevo: CONTRATO, Anexo de Contrato
+// Cargo, Anexo Pacto Horas Extras" — NO va CI ni Antecedentes acá, a
+// diferencia de Lo Barnechea). Cada uno tiene su propio título y su propio
+// bloque de firma — verificar solo "hay alguna firma en el archivo" no
+// alcanza, hay que confirmar que LOS 3 documentos estén Y que cada uno esté
+// firmado por ambas partes.
+const VA_CONTRATO_TIPOS=['CONTRATO','ANEXO_CARGO','ANEXO_HHEE'];
+function va_clasificarTituloContrato(txt){
+  if(/ANEXO\s+DE\s+CONTRATO/i.test(txt)){
+    return /Pacto\s+Horas\s+Extras|horas\s+extraordinarias/i.test(txt)?'ANEXO_HHEE':'ANEXO_CARGO';
+  }
+  if(/CONTRATO\s+DE\s+TRABAJO/i.test(txt))return'CONTRATO';
+  return null;
+}
+// Firma FÍSICA (mancha de tinta) buscada por la posición de la ÚLTIMA
+// aparición de la etiqueta impresa en la página ("TRABAJADOR" / "EMPLEADOR"
+// o el nombre de la empresa) — la firma/timbre se dibuja arriba de esa
+// etiqueta. Se usa la última aparición porque esas palabras también salen
+// sueltas dentro del texto de las cláusulas ("el trabajador", "el
+// empleador"), y el bloque de firma real es siempre lo último de la página.
+// Validado contra 3 páginas reales de contratos firmados a mano en
+// Antofagasta (no manuscrito — Lo Barnechea usa QR, acá se ve mitad y
+// mitad): funciona tanto con la firma en su propia página (arriba) como
+// compartiendo página con el cuerpo del documento (abajo).
+function va_detectarFirmaFisicaPorEtiqueta(words,imgData,imgWidth,imgHeight,labelRegex,altoZona){
+  altoZona=altoZona||70;
+  let ultimo=null;
+  for(const w of (words||[])){
+    const texto=(w.text||'').trim();
+    if(!texto||!labelRegex.test(texto))continue;
+    const bbox=w.bbox||{};
+    if(!ultimo||bbox.y0>=ultimo.y0){ultimo=bbox;}
+  }
+  if(!ultimo)return false;
+  const zy0=Math.max(0,ultimo.y0-altoZona),zy1=ultimo.y0;
+  const zx0=Math.max(0,ultimo.x0-15),zx1=Math.min(imgWidth,ultimo.x1+15);
+  if(zy1<=zy0||zx1<=zx0)return false;
+  let dark=0,total=0;
+  for(let yy=zy0;yy<zy1;yy++){
+    for(let xx=zx0;xx<zx1;xx++){
+      const idx=(yy*imgWidth+xx)*4;
+      const gray=imgData[idx]*0.299+imgData[idx+1]*0.587+imgData[idx+2]*0.114;
+      if(gray<180)dark++;
+      total++;
+    }
+  }
+  return total>0&&(dark/total)>=0.01;
+}
+
 async function va_validarContratosAntofagasta(){
   const dd=va_docsData['contratos'];
   const res={nombre:'H · Contratos',cargado:false,estado:'—',detalle:'',nuevos:0,cubiertos:0,faltantes:[]};
@@ -12594,6 +12644,8 @@ async function va_validarContratosAntofagasta(){
   });
   res.nuevos=nuevosLH.length;
   const NOMBRE_RE=/Nombre\s+([A-ZÁÉÍÓÚÑ][^\n:]+?)(?=\s*:?\s*Nombre\b|\s*\n|$)/gi;
+  const TRAB_LABEL_RE=/TRABAJADOR/i;
+  const EMP_LABEL_RE=/EMPLEADOR|AKRO|DISE.OS/i;
   const cubiertosSet=new Set();
   const incompletos=[];
   for(let bi=0;bi<dd.buffers.length;bi++){
@@ -12603,7 +12655,9 @@ async function va_validarContratosAntofagasta(){
     if(!nombreArchivo)continue;
     const worker=va_matchNombreNomina(nombreArchivo,nuevosLH);
     if(!worker)continue; // no matchea con ningún nuevo ingreso del período — no es un caso a exigir acá
-    let firmaTrab=false,firmaEmp=false;
+    const docs={};
+    VA_CONTRATO_TIPOS.forEach(t=>docs[t]={presente:false,firmaTrab:false,firmaEmp:false});
+    let tipoActual=null;
     try{
       const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
       for(let p=1;p<=pdf.numPages;p++){
@@ -12611,46 +12665,87 @@ async function va_validarContratosAntofagasta(){
         const vp=page.getViewport({scale:2.6});
         const canvas=document.createElement('canvas');
         canvas.width=vp.width;canvas.height=vp.height;
-        await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+        const ctx=canvas.getContext('2d');
+        await page.render({canvasContext:ctx,viewport:vp}).promise;
         const blob=await new Promise(res2=>canvas.toBlob(res2,'image/png'));
-        let firmantes=[];
+        let ocrText='',ocrWords=[];
         try{
-          const {data:{text}}=await ren_ocrWorker.recognize(blob);
-          firmantes=[...text.matchAll(NOMBRE_RE)].map(m=>m[1].trim()).filter(Boolean);
+          const {data}=await ren_ocrWorker.recognize(blob);
+          ocrText=data.text||'';
+          ocrWords=data.words||[];
         }catch(ocrErr){console.warn('OCR Contrato Antofagasta p'+p,ocrErr);}
-        if(!firmantes.length&&iaKeyOk){
+        // El título solo aparece en la primera página de cada documento — las
+        // páginas de firma/continuación heredan el tipo de la última página
+        // titulada (mismo patrón que enContratoHasta en Lo Barnechea).
+        const tipoPagina=va_clasificarTituloContrato(ocrText);
+        if(tipoPagina)tipoActual=tipoPagina;
+        if(!tipoActual)continue;
+        docs[tipoActual].presente=true;
+        // 1) Firma QR/electrónica (texto)
+        let firmantes=[...ocrText.matchAll(NOMBRE_RE)].map(m=>m[1].trim()).filter(Boolean);
+        // 2) Si no hay texto de firma QR, puede ser firma FÍSICA (a mano) —
+        // confirmado con datos reales: en esta base algunos trabajadores
+        // firman por QR y otros a mano, mezclado archivo por archivo.
+        let firmaFisicaTrab=false,firmaFisicaEmp=false;
+        if(!firmantes.length){
+          try{
+            const imgData=ctx.getImageData(0,0,canvas.width,canvas.height).data;
+            firmaFisicaTrab=va_detectarFirmaFisicaPorEtiqueta(ocrWords,imgData,canvas.width,canvas.height,TRAB_LABEL_RE);
+            firmaFisicaEmp=va_detectarFirmaFisicaPorEtiqueta(ocrWords,imgData,canvas.width,canvas.height,EMP_LABEL_RE);
+          }catch(fisicaErr){console.warn('Firma física Contrato Antofagasta p'+p,fisicaErr);}
+        }
+        if(!firmantes.length&&!firmaFisicaTrab&&!firmaFisicaEmp&&iaKeyOk){
           try{
             const base64=await new Promise(res2=>{const rd=new FileReader();rd.onloadend=()=>res2(rd.result.split(',')[1]);rd.readAsDataURL(blob);});
             const respIA=await va_iaLeerImagen(base64,
-              'Esta es una página de un Contrato de Trabajo chileno (o su Anexo), escaneada. Si tiene un '+
-              'bloque "Firmado electrónicamente por:" con nombre(s), respondé SOLO en JSON: '+
-              '{"firmantes":["nombre1","nombre2"]} (uno o dos nombres, los que veas ahí). Si no hay ningún '+
-              'bloque de firma en esta página, respondé {"firmantes":[]}.');
+              'Esta es una página de un Contrato de Trabajo chileno (o su Anexo), escaneada. Puede tener firma '+
+              'electrónica (bloque "Firmado electrónicamente por:" con nombre) o firma física a mano (con o sin '+
+              'timbre de la empresa). Respondé SOLO en JSON: {"firmantes":["nombre1","nombre2"]} — si es firma '+
+              'física sin nombre legible, poné "FIRMA_TRABAJADOR" o "FIRMA_EMPLEADOR" según corresponda en vez '+
+              'del nombre. Si no hay ninguna firma en esta página, respondé {"firmantes":[]}.');
             const mIA=respIA.match(/\{[\s\S]*\}/);
             if(mIA){const parsed=JSON.parse(mIA[0]);if(Array.isArray(parsed.firmantes))firmantes=parsed.firmantes.filter(Boolean);}
           }catch(iaErr){console.warn('IA Contrato Antofagasta p'+p,iaErr);}
         }
+        if(firmaFisicaTrab){
+          docs[tipoActual].firmaTrab=true;
+          va_iaAuditLog.push({modulo:'Contrato (Antofagasta)',pagina:p,tipo:'FIRMA_FISICA_'+tipoActual,
+            nombreLeido:'(firma física — sin nombre)',resultado:'firma_trabajador',atribuidoA:worker.nombre,motivo:null});
+        }
+        if(firmaFisicaEmp){
+          docs[tipoActual].firmaEmp=true;
+          va_iaAuditLog.push({modulo:'Contrato (Antofagasta)',pagina:p,tipo:'FIRMA_FISICA_'+tipoActual,
+            nombreLeido:'(firma física — sin nombre)',resultado:'firma_empleador',atribuidoA:worker.nombre,motivo:null});
+        }
         for(const nombreFirmante of firmantes){
-          const esElTrabajador=va_coberturaTokens(va_tokensNombre(nombreFirmante),va_tokensNombre(worker.nombre))>=0.6;
-          va_iaAuditLog.push({modulo:'Contrato (Antofagasta)',pagina:p,tipo:'FIRMA_CONTRATO',
+          const esFirmaTrabajadorGenerica=/^FIRMA_TRABAJADOR$/i.test(nombreFirmante);
+          const esFirmaEmpleadorGenerica=/^FIRMA_EMPLEADOR$/i.test(nombreFirmante);
+          const esElTrabajador=esFirmaTrabajadorGenerica||(!esFirmaEmpleadorGenerica&&
+            va_coberturaTokens(va_tokensNombre(nombreFirmante),va_tokensNombre(worker.nombre))>=0.6);
+          va_iaAuditLog.push({modulo:'Contrato (Antofagasta)',pagina:p,tipo:'FIRMA_'+tipoActual,
             nombreLeido:nombreFirmante,resultado:esElTrabajador?'firma_trabajador':'firma_empleador',
             atribuidoA:worker.nombre,motivo:esElTrabajador?null:'no coincide con el trabajador rastreado — se asume firma del empleador'});
-          if(esElTrabajador)firmaTrab=true;else firmaEmp=true;
+          if(esElTrabajador)docs[tipoActual].firmaTrab=true;else docs[tipoActual].firmaEmp=true;
         }
       }
     }catch(fileErr){console.warn('Contrato Antofagasta '+fname,fileErr);}
-    if(firmaTrab&&firmaEmp){
+    const faltantesDoc=VA_CONTRATO_TIPOS.filter(t=>!docs[t].presente);
+    const incompletosDoc=VA_CONTRATO_TIPOS.filter(t=>docs[t].presente&&!(docs[t].firmaTrab&&docs[t].firmaEmp));
+    if(!faltantesDoc.length&&!incompletosDoc.length){
       cubiertosSet.add(worker.rutNorm);
     }else{
-      incompletos.push({rut:worker.rut,nombre:worker.nombre,
-        falta:!firmaTrab&&!firmaEmp?'ambas firmas':(!firmaTrab?'firma del trabajador':'firma del empleador')});
+      const detalles=[
+        ...faltantesDoc.map(t=>`falta ${t}`),
+        ...incompletosDoc.map(t=>`${t} sin firma de ${!docs[t].firmaTrab&&!docs[t].firmaEmp?'ambas partes':(!docs[t].firmaTrab?'trabajador':'empleador')}`)
+      ];
+      incompletos.push({rut:worker.rut,nombre:worker.nombre,falta:detalles.join(' · ')});
     }
   }
   const sinArchivo=nuevosLH.filter(x=>!cubiertosSet.has(x.rutNorm)&&!incompletos.some(i=>i.rut===x.rut));
   res.cubiertos=cubiertosSet.size;
   res.faltantes=[...incompletos,...sinArchivo.map(x=>({rut:x.rut,nombre:x.nombre,falta:'archivo de contrato'}))];
   res.estado=res.faltantes.length===0?'✅':'⚠';
-  res.detalle=`${cubiertosSet.size}/${nuevosLH.length} nuevos con Contrato firmado por ambas partes`;
+  res.detalle=`${cubiertosSet.size}/${nuevosLH.length} nuevos con los 3 documentos (Contrato + Anexo Cargo + Anexo HHEE) firmados por ambas partes`;
 }
 
 // ── Libro Remuneraciones ──
