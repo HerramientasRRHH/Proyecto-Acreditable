@@ -45,6 +45,30 @@ no los tenés — no se puede auditar nada sin los archivos reales.
 Tomá 5-10 casos ❌/⚠ del reporte, y 2-3 casos ✅ como control (para confirmar
 que el comparador funciona en el caso positivo también).
 
+### 3.5. Antes de asumir la estructura de un documento nuevo, MIRALO
+Si estás por auditar/implementar algo sobre una base o tipo de documento que
+todavía no conocés (ej. entrar a Antofagasta después de haber trabajado solo
+en Lo Barnechea), no asumas que se organiza igual. Renderizá 2-3 páginas
+reales a PNG con PyMuPDF y mirálas con el tool `Read` (que sí puede ver
+imágenes) antes de escribir ningún prompt o regex:
+
+```python
+import fitz
+doc = fitz.open(r"ruta\al.pdf")
+pix = doc[0].get_pixmap(matrix=fitz.Matrix(1.8, 1.8))
+pix.save(r"ruta\salida.png")
+```
+
+Esto fue lo que reveló, al pasar de Lo Barnechea a Antofagasta, que:
+Contrato/Liquidaciones/Libro ahí son 100% fotocopias escaneadas (cero texto
+nativo, a diferencia de Lo Barnechea donde Liquidaciones/Contrato eran
+digitales); que el Contrato individual por trabajador en realidad empaqueta
+3 documentos con firma propia cada uno (Contrato + Anexo Cargo + Anexo Pacto
+HHEE); y que ahí SÍ aparecen ambas firmas (trabajador y empleador) juntas
+bajo el mismo encabezado, a diferencia de Lo Barnechea donde había que
+inferir por descarte. Nada de esto se ve leyendo el código o el texto
+extraído — solo mirando la página real.
+
 ### 4. Reproducir el llamado a la IA FUERA del navegador
 Usá `scripts/call_ia_page.py` (bundled en este skill) para renderizar
 páginas puntuales del PDF y mandarlas al mismo endpoint/modelo/prompt que usa
@@ -104,6 +128,21 @@ también `scripts/match_nombre.py` para que seas fiel a la misma lógica (y
 viceversa: si encontrás el bug primero en Python, el fix probablemente nace
 ahí y se porta al JS después).
 
+**Si el nombre viene impreso/tipeado (no manuscrito)** en el documento —
+como el "TRABAJADOR SR." del Libro de Antofagasta, a diferencia del cuaderno
+manuscrito de Lo Barnechea — probá primero con OCR local (Tesseract, ya
+integrado vía `ren_ocrWorker`/`cargarOCR()`) antes de gastar una llamada a la
+IA visual: extraé el nombre con un regex tolerante a ruido, matchealo con
+`va_matchNombreNomina`, y solo si falla recién ahí llamá a la IA. Medido
+contra 30 páginas reales del Libro de Antofagasta, el OCR solo resuelve
+~15-20% de los casos sin gastar IA (la alineación/calidad de cada foto varía
+mucho) — no es una bala de plata, pero al ser gratis siempre vale la pena
+intentarlo primero. Cuando el regex de extracción capture texto de más
+(ej. arrastra una etiqueta como "MES" pegada al nombre), es más robusto
+agregar esa palabra a `VA_STOP_TOKENS` que perseguir cada variante de ruido
+con un regex más estricto — el matcher por tokens ya está diseñado para
+tolerar basura alrededor del nombre real.
+
 ### 7. Chequeo de sintaxis antes de commitear
 No hay forma de correr el flujo completo de la app con archivos reales sin
 un mecanismo de subida de archivos en el navegador sandbox de Claude Code —
@@ -133,10 +172,26 @@ chequeo) confiar en el commit sin tener que re-auditar desde cero.
 
 Este proceso aplica a cualquier lectura con IA en este proyecto, no solo
 Libro/Contrato — mismo patrón para Licencias Médicas leídas con IA
-(`licMedIA` en `va_validarLiquidaciones`), y a futuro para Antofagasta/
-Vitacura cuando se implemente lectura de Libro ahí (hoy esas bases solo
-hacen conteo de páginas, sin IA — ver `va_validarLibroAsist` /
-`va_validarVitacuraLibroAsist`).
+(`licMedIA` en `va_validarLiquidaciones`), Exención de Cotizar
+(`va_validarExenciones`), y el Libro de Asistencia de Antofagasta
+(`va_validarLibroAsist`, ver tabla de bases abajo). Vitacura todavía no
+tiene lectura con IA de su Libro (`va_validarVitacuraLibroAsist` sigue
+siendo solo conteo de páginas) — pendiente si algún día se pide.
+
+Cada lectura con IA debería dejar su rastro en `va_iaAuditLog` (con un
+nombre de módulo propio) y renderizarse con `va_renderIAAuditSection(nombreModulo)`
+al final del render function de SU PROPIO módulo (Libro dentro de la pestaña
+del Libro, Contrato dentro de Liquidaciones, etc.) — pedido explícito del
+usuario: no juntar todo en una pestaña aparte, cada módulo muestra su propio
+detalle integral.
+
+### Bases conocidas — cómo vienen sus documentos
+
+| Base | Contrato/Liq/Libro | Firma | Libro aplica a | Notas |
+|---|---|---|---|---|
+| Lo Barnechea / Las Condes / Mejillones | Contrato y Libro intercalados DENTRO del PDF de Liquidaciones (BUK, mayormente digital) | QR/electrónica (texto "Firmado electrónicamente por") | Solo `dias<30` (caso MENOS_30 de `va_clasificar`) | Nombre del Libro a veces manuscrito |
+| Antofagasta | Liquidaciones y Libro en archivos SEPARADOS, divididos por letra de apellido (~24 archivos c/u); Contrato en archivo individual por trabajador (bundlea Contrato+Anexo Cargo+Anexo HHEE) | Física (Liq/Libro, requiere OCR) o QR con ambas partes juntas bajo el mismo encabezado (Contrato) | TODOS los activos, sin importar días — NO filtrar por `dias<30` acá | 100% escaneado, cero texto nativo — nómina ~350 trabajadores, volumen de páginas mucho mayor |
+| Vitacura | Contrato en slot propio (`va_validarContratosVitacura`); Libro sin IA todavía | — | — | Pendiente de auditar si se pide trabajar acá |
 
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
