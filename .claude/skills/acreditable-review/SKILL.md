@@ -168,6 +168,41 @@ Mensaje de commit largo: qué bug es, qué evidencia real lo confirma (no
 Esto es lo que le permite a la próxima persona (o a vos, en el próximo
 chequeo) confiar en el commit sin tener que re-auditar desde cero.
 
+## Trampas encontradas al auditar una carpeta completa (no solo un caso puntual)
+
+Cuando el pedido es "revisá/integrá todo lo que hay en esta carpeta" en vez
+de "arreglá este caso puntual", además del proceso de arriba conviene
+chequear estas cosas — todas se encontraron auditando Antofagasta carpeta
+por carpeta contra documentos reales, ninguna se ve leyendo el código solo:
+
+- **Un mismo PDF puede mezclar formatos distintos en páginas distintas.**
+  El "Licencia médica" de Antofagasta arranca con un listado tabular
+  (varias filas por página) y sigue con comprobantes individuales de
+  respaldo (Caja18) — el parser tiene que reconocer AMBOS o al menos no
+  romperse con el que no maneja. No asumas que todo el archivo sigue el
+  mismo layout que la primera página que viste.
+- **Una página puede estar físicamente escaneada boca abajo.**
+  `page.rotation` del PDF puede decir 0 (sin flag de rotación) mientras el
+  contenido real está invertido 180° — un error de quien alimentó la hoja
+  al scanner, no metadata del PDF. El síntoma es un OCR que da texto
+  irreconocible/espejado. `va_ocrPaginaMejorRotacion()` prueba 0° y 180° y
+  se queda con el que tenga más coincidencias de fecha/palabras clave —
+  reusala en vez de asumir que la orientación siempre viene bien.
+- **Los topes de página de `va_getPdfTextOCR(buf, maxPagesOCR)` NO son
+  "leer las primeras N páginas".** Si el PDF completo tiene MÁS páginas que
+  `maxPagesOCR`, se salta el OCR de TODO el archivo (es un freno de
+  rendimiento, no un límite de lectura parcial). Un documento con más
+  páginas de las esperadas para esa función (ej. un listado de 95 páginas
+  contra un tope viejo de 10) queda totalmente sin leer, no parcialmente —
+  hay que subir el tope, no asumir que "algo se lee igual".
+- **Verificá que el ID del documento esté excluido del sweep genérico**
+  (`va_validarGenerico`, loop en `va_ejecutar`) antes de agregar una función
+  de validación dedicada nueva — si no, el resultado dedicado se pisa
+  silenciosamente después de correr (encontrado con 'contratos': el bug ya
+  existía para Vitacura, no introducido por el cambio de Antofagasta, pero
+  hay que revisarlo cada vez que se agrega una función nueva para un slot
+  que ya existía).
+
 ## Alcance
 
 Este proceso aplica a cualquier lectura con IA en este proyecto, no solo
