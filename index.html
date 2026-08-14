@@ -11227,6 +11227,7 @@ async function va_validarLiquidaciones(){
     try{
       const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
       let currentRut=null;
+      let enContratoHasta=0; // última página (num) que todavía cuenta como parte de un Contrato en curso
       for(let p=1;p<=pdf.numPages;p++){
         // Progreso: 6-34% repartido entre todas las páginas de todos los buffers
         const progPct=Math.round(6+(p/pdf.numPages)*26);
@@ -11332,6 +11333,13 @@ async function va_validarLiquidaciones(){
         const esCartaExpText = /se[nñ]or\s+ilustre\s+municipalidad/i.test(txt) || /aclaraci[oó]n\s+libro/i.test(txt);
         const esReglamentoText = /reglamento\s+interno/i.test(txt) && /derecho\s+a\s+saber/i.test(txt);
         const esLibroText = /Libro\s+de\s+Asistencia|Registro\s+de\s+Asistencia|Control\s+de\s+Asistencia/i.test(txt);
+        // Constancia de la Dirección del Trabajo: reemplaza la firma del Contrato
+        // cuando el trabajador no lo firmó y ya está desvinculado. Sin ejemplo
+        // real para calibrar contra un caso confirmado — texto basado en la
+        // descripción del usuario, revisar el primer caso real que aparezca.
+        const esConstanciaNoFirmaText = /Direcci[oó]n\s+del\s+Trabajo/i.test(txt)
+          && (/no\s+firm[oó]/i.test(txt) || /no\s+suscribi[oó]/i.test(txt)
+              || /se\s+neg[oó]\s+a\s+firmar/i.test(txt) || /sin\s+firma\s+del\s+contrato/i.test(txt));
 
         const esOtroDocText = esContratoText || esAntecText || esCIText || esLicMedText
                               || esComprobanteText || esRenunciaText || esCartaDTText
@@ -11533,6 +11541,11 @@ async function va_validarLiquidaciones(){
           || (!esLiquidacion && /libro\s+de\s+asistencia|registro\s+de\s+asistencia|control\s+de\s+asistencia/i.test(txt));
         const esContrato = esContratoText
           || (/contrato\s+de\s+trabajo/i.test(txt) && /c[eé]dula\s+nacional\s+de\s+identidad/i.test(txt));
+        // El Contrato ocupa varias páginas pero solo la primera trae el título
+        // — las páginas de cierre (con la firma) no vuelven a decir "CONTRATO
+        // DE TRABAJO". Mantenemos "dentro del contrato" por 2 páginas más para
+        // poder leer la firma que está en la última.
+        if(esContrato) enContratoHasta=Math.max(enContratoHasta,p+2);
         const esCI = esPageCI || esCIText
           || (/c[eé]dula.*identidad|cedula.*identidad/i.test(txt) && txt.replace(/\s/g,'').length < 1500);
         const esAntec = esAntecText
@@ -11694,6 +11707,52 @@ async function va_validarLiquidaciones(){
           }
         }
         if(esContrato) w.tieneContrato = true;
+        if(esConstanciaNoFirmaText) w.tieneConstanciaNoFirma = true;
+        // ── FIRMA DEL CONTRATO: QR (electrónica) + física, trabajador Y empleador ──
+        // Regla pedida por el usuario: el Contrato necesita firma (física o QR) de
+        // AMBAS partes. El bloque QR "Firmado electrónicamente por: Nombre" no dice
+        // de quién es — lo resolvemos comparando el nombre firmante contra el
+        // trabajador que estamos rastreando (w): si coincide, es su firma; si no,
+        // asumimos que es el representante del empleador (verificado con 2 casos
+        // reales: contratos de Molina Lizana y Morales Matamala, donde el único QR
+        // presente era el de "Luis Florencio Luengo Garcia" — el empleador — con la
+        // firma del trabajador ausente).
+        // La zona de firma física es una HEURÍSTICA sin validar contra un contrato
+        // firmado a mano real (no había ninguno en la muestra usada para este fix) —
+        // revisar el primer caso real y ajustar si hace falta.
+        if(p<=enContratoHasta){
+          const qrMatches=[...txt.matchAll(/Firmado\s+electr[oó]nicamente\s+por:\s*\n?\s*Nombre\s*\n?\s*([^\n]+)/gi)];
+          for(const qm of qrMatches){
+            const nombreFirmante=(qm[1]||'').trim();
+            if(!nombreFirmante)continue;
+            const esElTrabajador=va_coberturaTokens(va_tokensNombre(nombreFirmante),va_tokensNombre(w.nombre))>=0.6;
+            if(esElTrabajador)w.contratoFirmaTrabajador=true;
+            else w.contratoFirmaEmpleador=true;
+          }
+          if(textoUtil<200){
+            try{
+              const vpC=page.getViewport({scale:1.3});
+              const cvC=document.createElement('canvas');
+              cvC.width=Math.round(vpC.width);cvC.height=Math.round(vpC.height);
+              const ctxC=cvC.getContext('2d');
+              await page.render({canvasContext:ctxC,viewport:vpC}).promise;
+              const fy0=Math.round(cvC.height*0.78),fy1=Math.round(cvC.height*0.96);
+              const fxMid=Math.round(cvC.width*0.5);
+              const zoneDark=(x0,x1)=>{
+                const z=ctxC.getImageData(x0,fy0,x1-x0,fy1-fy0);
+                let dark=0;
+                for(let di=0;di<z.data.length;di+=4){
+                  const gray=z.data[di]*0.299+z.data[di+1]*0.587+z.data[di+2]*0.114;
+                  if(gray<200)dark++;
+                }
+                return dark/(z.data.length/4);
+              };
+              const dEmp=zoneDark(0,fxMid),dTrab=zoneDark(fxMid,cvC.width);
+              if(dEmp>=0.003&&dEmp<0.85)w.contratoFirmaEmpleadorFisica=true;
+              if(dTrab>=0.003&&dTrab<0.85)w.contratoFirmaTrabajadorFisica=true;
+            }catch(ceF){console.warn('FirmaFisica contrato:',ceF);}
+          }
+        }
         if(esCI) w.tieneCI = true;
         if(esAntec) w.tieneAntec = true;
         if(esLicMed){
@@ -12107,7 +12166,19 @@ function va_clasificar(t,liq){
         if(liq.tieneAntec)r.docsOk.push('Antecedentes');else r.docsFalt.push('Antecedentes');
       }else{
         r.docsReq.push('Contrato','CI','Antecedentes');
-        if(liq.tieneContrato)r.docsOk.push('Contrato');else r.docsFalt.push('Contrato');
+        if(!liq.tieneContrato){
+          r.docsFalt.push('Contrato');
+        }else{
+          const firmaTrab=liq.contratoFirmaTrabajador||liq.contratoFirmaTrabajadorFisica;
+          const firmaEmp=liq.contratoFirmaEmpleador||liq.contratoFirmaEmpleadorFisica;
+          if(firmaTrab&&firmaEmp){
+            r.docsOk.push('Contrato (firmado trabajador y empleador)');
+          }else if(liq.tieneConstanciaNoFirma){
+            r.docsOk.push('Contrato (sin firma '+(!firmaTrab?'trabajador':'empleador')+' — con Constancia DT)');
+          }else{
+            r.docsFalt.push('Contrato — falta firma de '+(!firmaTrab?'trabajador':'empleador')+' (sin Constancia DT)');
+          }
+        }
         if(liq.tieneCI)r.docsOk.push('CI');else r.docsFalt.push('CI');
         if(liq.tieneAntec)r.docsOk.push('Antecedentes');else r.docsFalt.push('Antecedentes');
       }
