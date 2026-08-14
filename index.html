@@ -11116,21 +11116,13 @@ function va_renderDocSlots(base){
     dz.ondragover=e=>{e.preventDefault();dz.classList.add('over');};dz.ondragleave=()=>dz.classList.remove('over');
     dz.ondrop=e=>{e.preventDefault();dz.classList.remove('over');const inp=document.getElementById('va-doc-'+d.id+'-f');
       const dt=new DataTransfer();[...e.dataTransfer.files].forEach(f=>dt.items.add(f));inp.files=dt.files;va_onDocFile(d.id,inp);};});},50);
-  // Paso 6 (IA): mostrar la tarjeta y poblar el selector de documentos grandes de esta base
-  const iavCard=document.getElementById('iav-card');
-  if(iavCard){
-    iavCard.style.display='';
-    const sel=document.getElementById('iav-bigdoc');
-    if(sel){
-      const grandes=cfg.docs.filter(d=>/libroasist|librorem|libro/i.test(d.id));
-      sel.innerHTML=(grandes.length?grandes:cfg.docs)
-        .map(d=>`<option value="${d.id}">${d.label}</option>`).join('');
-    }
-    iav_bigScan={};
-    const rs=document.getElementById('iav-scan-resumen');if(rs){rs.style.display='none';rs.innerHTML='';}
-    const out=document.getElementById('iav-out');if(out){out.style.display='none';out.innerHTML='';}
-    const act=document.getElementById('iav-actions');if(act)act.style.display='none';
-  }
+  // Paso 6 (Motor IA) se dejó de mostrar en el módulo a pedido del usuario —
+  // la tarjeta #iav-card queda con su display:none original del HTML. El
+  // motor IA sigue funcionando igual (iav_loadCfg() precarga la key desde
+  // window.NUCLEO_CONFIG apenas carga la página, sin depender de que esta
+  // tarjeta se vea), así que la lectura del Libro/Contrato en el Paso 5 no
+  // se ve afectada. Si alguna vez hace falta volver a mostrarla (ej. para
+  // rotar la key a mano), agregar de vuelta: document.getElementById('iav-card').style.display='';
 }
 async function va_onDocFile(id,inp){
   const ff=[...inp.files];if(!ff.length)return;const dd=va_docsData[id];dd.files=ff;dd.buffers=[];
