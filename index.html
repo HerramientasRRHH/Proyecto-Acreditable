@@ -11742,9 +11742,13 @@ async function va_validarLiquidaciones(){
         // reales: contratos de Molina Lizana y Morales Matamala, donde el único QR
         // presente era el de "Luis Florencio Luengo Garcia" — el empleador — con la
         // firma del trabajador ausente).
-        // La zona de firma física es una HEURÍSTICA sin validar contra un contrato
-        // firmado a mano real (no había ninguno en la muestra usada para este fix) —
-        // revisar el primer caso real y ajustar si hace falta.
+        // Firma física: misma técnica validada contra datos reales de Antofagasta
+        // (va_detectarFirmaFisicaPorEtiqueta, ver skill acreditable-review) — busca
+        // la ÚLTIMA aparición de la etiqueta impresa "TRABAJADOR"/"EMPLEADOR" (por
+        // posición real vía Tesseract, no una zona fija de la página) y revisa la
+        // tinta arriba de esa etiqueta. Se aplica acá también porque, igual que en
+        // Antofagasta, la firma del Contrato puede venir física o por QR — no es
+        // exclusivo de una base.
         if(p<=enContratoHasta){
           const qrMatches=[...txt.matchAll(/Firmado\s+electr[oó]nicamente\s+por:\s*\n?\s*Nombre\s*\n?\s*([^\n]+)/gi)];
           for(const qm of qrMatches){
@@ -11757,27 +11761,18 @@ async function va_validarLiquidaciones(){
             if(esElTrabajador)w.contratoFirmaTrabajador=true;
             else w.contratoFirmaEmpleador=true;
           }
-          if(textoUtil<200){
+          if(textoUtil<200&&!(w.contratoFirmaTrabajador&&w.contratoFirmaEmpleador)){
             try{
-              const vpC=page.getViewport({scale:1.3});
+              const vpC=page.getViewport({scale:2.6});
               const cvC=document.createElement('canvas');
               cvC.width=Math.round(vpC.width);cvC.height=Math.round(vpC.height);
               const ctxC=cvC.getContext('2d');
               await page.render({canvasContext:ctxC,viewport:vpC}).promise;
-              const fy0=Math.round(cvC.height*0.78),fy1=Math.round(cvC.height*0.96);
-              const fxMid=Math.round(cvC.width*0.5);
-              const zoneDark=(x0,x1)=>{
-                const z=ctxC.getImageData(x0,fy0,x1-x0,fy1-fy0);
-                let dark=0;
-                for(let di=0;di<z.data.length;di+=4){
-                  const gray=z.data[di]*0.299+z.data[di+1]*0.587+z.data[di+2]*0.114;
-                  if(gray<200)dark++;
-                }
-                return dark/(z.data.length/4);
-              };
-              const dEmp=zoneDark(0,fxMid),dTrab=zoneDark(fxMid,cvC.width);
-              if(dEmp>=0.003&&dEmp<0.85)w.contratoFirmaEmpleadorFisica=true;
-              if(dTrab>=0.003&&dTrab<0.85)w.contratoFirmaTrabajadorFisica=true;
+              const blobC=await new Promise(res2=>cvC.toBlob(res2,'image/png'));
+              const {data:dataC}=await ren_ocrWorker.recognize(blobC);
+              const imgDataC=ctxC.getImageData(0,0,cvC.width,cvC.height).data;
+              if(va_detectarFirmaFisicaPorEtiqueta(dataC.words,imgDataC,cvC.width,cvC.height,/TRABAJADOR/i))w.contratoFirmaTrabajadorFisica=true;
+              if(va_detectarFirmaFisicaPorEtiqueta(dataC.words,imgDataC,cvC.width,cvC.height,/EMPLEADOR|AKRO|DISE.OS/i))w.contratoFirmaEmpleadorFisica=true;
             }catch(ceF){console.warn('FirmaFisica contrato:',ceF);}
           }
         }
