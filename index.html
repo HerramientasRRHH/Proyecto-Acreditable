@@ -7513,7 +7513,8 @@ function rl_showPreviewCanvas(canvas, titulo){
 <!-- PASO 3 -->
 <div class="card" id="va-card-docs" style="display:none">
   <h2><span class="snum">3</span> Cargar Documentos del Acreditable</h2>
-  <p class="hint" style="margin-bottom:12px">Sube los documentos de la carpeta. Puedes cargarlos en cualquier orden.</p>
+  <p class="hint" style="margin-bottom:12px">Sube los documentos de la carpeta. Puedes cargarlos en cualquier orden — o soltalos todos juntos en "Carga masiva" y se reparten solos.</p>
+  <div id="va-carga-masiva"></div>
   <div id="va-docs-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px"></div>
 </div>
 <!-- PASO 4 -->
@@ -10569,7 +10570,7 @@ const VA_BASES={
       {id:'f30',label:'E · F30',icon:'📋',accept:'.pdf',multi:false,tip:'Cert. Antecedentes Laborales'},
       {id:'f301',label:'F · F30-1',icon:'📋',accept:'.pdf',multi:false,tip:'Cert. Cumplimiento Obligaciones'},
       {id:'f301carta',label:'Carta F30-1',icon:'📝',accept:'.pdf',multi:false,tip:'Opcional — justifica faltantes'},
-      {id:'previred',label:'G · PreviRed',icon:'💰',accept:'.pdf',multi:false,tip:'Comprobante Pago Cotizaciones'},
+      {id:'previred',label:'G · PreviRed',icon:'💰',accept:'.pdf',multi:true,tip:'Comprobante Pago Cotizaciones — incluye acá también el Impositivo.pdf de la misma carpeta'},
       {id:'finiq',label:'H · Finiquitos',icon:'📑',accept:'.pdf',multi:true,tip:'PDF unificado'},
       {id:'jubilados',label:'H · Listado Jubilados',icon:'👴',accept:'.pdf',multi:false,tip:'Listado tabular de jubilados'},
       {id:'exencion',label:'H · Exención Cotizar',icon:'📜',accept:'.pdf',multi:true,tip:'Formularios exención AFP'},
@@ -11184,6 +11185,7 @@ function va_renderDocSlots(base){
     dz.ondragover=e=>{e.preventDefault();dz.classList.add('over');};dz.ondragleave=()=>dz.classList.remove('over');
     dz.ondrop=e=>{e.preventDefault();dz.classList.remove('over');const inp=document.getElementById('va-doc-'+d.id+'-f');
       const dt=new DataTransfer();[...e.dataTransfer.files].forEach(f=>dt.items.add(f));inp.files=dt.files;va_onDocFile(d.id,inp);};});},50);
+  va_renderCargaMasiva(base);
   // Paso 6 (Motor IA) se dejó de mostrar en el módulo a pedido del usuario —
   // la tarjeta #iav-card queda con su display:none original del HTML. El
   // motor IA sigue funcionando igual (iav_loadCfg() precarga la key desde
@@ -11192,16 +11194,118 @@ function va_renderDocSlots(base){
   // se ve afectada. Si alguna vez hace falta volver a mostrarla (ej. para
   // rotar la key a mano), agregar de vuelta: document.getElementById('iav-card').style.display='';
 }
+// Refleja en la grilla (casillero por módulo) el estado actual de
+// va_docsData[id] — la reusan tanto va_onDocFile (carga manual, 1 casillero)
+// como va_cargaMasiva (carga masiva, N casilleros a la vez), así la carga
+// masiva no necesita su propia lógica de render: solo llena va_docsData y
+// pide que se refresque la MISMA grilla que ya existía.
+function va_actualizarSlotUI(id){
+  const dd=va_docsData[id];const fnEl=document.getElementById('va-doc-'+id+'-fn');
+  const dzEl=document.getElementById('va-doc-'+id+'-dz');
+  if(!dd||!fnEl||!dzEl)return;
+  if(!dd.files.length){fnEl.textContent='Sin archivo';dzEl.classList.remove('ok');return;}
+  const totalMB=dd.files.reduce((a,f)=>a+(f.size||0),0)/1048576;
+  const tam=totalMB>=1?` · ${totalMB.toFixed(1)} MB`:'';
+  fnEl.textContent=(dd.files.length===1?'✅ '+dd.files[0].name:`✅ ${dd.files.length} archivos`)+tam;
+  if(totalMB>25) fnEl.textContent+=' ⚠ documento grande';
+  dzEl.classList.add('ok');
+}
 async function va_onDocFile(id,inp){
   const ff=[...inp.files];if(!ff.length)return;const dd=va_docsData[id];dd.files=ff;dd.buffers=[];
   const totalMB=ff.reduce((a,f)=>a+(f.size||0),0)/1048576;
   const fnEl=document.getElementById('va-doc-'+id+'-fn');
   if(totalMB>15) fnEl.textContent=`⏳ Leyendo ${totalMB.toFixed(1)} MB…`;
   for(const f of ff){dd.buffers.push(await f.arrayBuffer());}
-  const tam=totalMB>=1?` · ${totalMB.toFixed(1)} MB`:'';
-  fnEl.textContent=(ff.length===1?'✅ '+ff[0].name:`✅ ${ff.length} archivos`)+tam;
-  if(totalMB>25) fnEl.textContent+=' ⚠ documento grande';
-  document.getElementById('va-doc-'+id+'-dz').classList.add('ok');
+  va_actualizarSlotUI(id);
+}
+
+// ══════════════════ CARGA MASIVA (un solo lugar para soltar TODO) ══════════════════
+// Pedido del usuario: en vez de ir casillero por casillero, arrastrar todos
+// los archivos de la base junta y que la app los reparta sola. El resultado
+// sigue viéndose exactamente igual (misma grilla, mismos módulos separados
+// al ejecutar) — lo único que cambia es CÓMO se llena esa grilla. Por diseño
+// NUNCA es silenciosa: los archivos que no se pudieron identificar por su
+// nombre quedan listados aparte para que el usuario los arrastre a mano al
+// casillero correcto (igual que hacía antes) — así un archivo mal nombrado
+// nunca se pierde ni se asigna mal sin que se note.
+// Orden importa: los patrones más específicos van ANTES que su versión
+// genérica (ej. F30-1 antes que F30, si no "F30-1.pdf" matchearía como F30).
+const VA_PATRONES_ARCHIVO=[
+  {id:'f301carta',pats:[/CARTA.*F ?30.?1|F ?30.?1.*CARTA/]},
+  {id:'f301',pats:[/F ?30.?1/]},
+  {id:'f30',pats:[/\bF ?30\b/]},
+  {id:'previred',pats:[/PREVIRED/,/IMPOSIT/]},
+  {id:'finiq',pats:[/FINIQUITO/]},
+  {id:'jubilados',pats:[/JUBILAD/]},
+  {id:'exencion',pats:[/EXENCION/]},
+  {id:'anexos',pats:[/REEMPLAZO/]},
+  {id:'cartanofirma',pats:[/CARTA.*NO.*FIRMA/]},
+  {id:'librorem',pats:[/LIBRO.*REMUNERACION/,/LIBRO.*\bREM\b/]},
+  {id:'libroasist_carta',pats:[/FE.*DE.*ERRATA/]},
+  {id:'contratos',pats:[/CONTRATO.*TRABAJO/]},
+  // cubre "asistencia" y typos reales vistos ("aiastencia", "asistebcia") — LIBRO
+  // + LETRA (siempre dice "letra X") es más robusto que intentar adivinar cada
+  // variante mal escrita de "asistencia".
+  {id:'libroasist',pats:[/LIBRO.*TENCIA/,/LIBRO.*LETRA/]},
+  {id:'discapacidad',pats:[/DISCAPACID/]},
+  {id:'mujeres',pats:[/FEMENIN/,/\bMUJER/]},
+  {id:'licencias',pats:[/LICENCIA.*MEDIC/]},
+  {id:'imput',pats:[/IMPUT/]},
+  {id:'liq',pats:[/LIQUIDACION/,/CARTA.*EXPLICATIVA.*(VACACION|DESVINCULACION|NO ?FIRM)/,/COMPROBANTE.*PAGO/]},
+];
+function va_normalizarNombreArchivo(s){
+  return (s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase();
+}
+function va_clasificarArchivoPorNombre(nombre,idsDisponibles){
+  const n=va_normalizarNombreArchivo(nombre);
+  for(const regla of VA_PATRONES_ARCHIVO){
+    if(idsDisponibles&&!idsDisponibles.has(regla.id))continue;
+    if(regla.pats.some(p=>p.test(n)))return regla.id;
+  }
+  return null;
+}
+function va_renderCargaMasiva(base){
+  const cfg=VA_BASES[base];
+  const cont=document.getElementById('va-carga-masiva');
+  if(!cont)return;
+  cont.innerHTML=`
+    <div class="dz" id="va-masiva-dz" style="border-style:dashed;padding:20px;margin-bottom:14px" onclick="document.getElementById('va-masiva-f').click()">
+      <div class="ico">📥</div><p><strong>Carga masiva</strong><br><small style="color:#aaa">Arrastrá TODOS los archivos de la base a la vez — se reparten solos a su casillero. Los que no se puedan identificar quedan listados abajo para asignarlos a mano.</small></p>
+      <input type="file" id="va-masiva-f" multiple style="display:none" onchange="va_cargaMasiva([...this.files])">
+    </div>
+    <div id="va-masiva-resumen"></div>`;
+  setTimeout(()=>{
+    const dz=document.getElementById('va-masiva-dz');if(!dz)return;
+    dz.ondragover=e=>{e.preventDefault();dz.classList.add('over');};
+    dz.ondragleave=()=>dz.classList.remove('over');
+    dz.ondrop=e=>{e.preventDefault();dz.classList.remove('over');va_cargaMasiva([...e.dataTransfer.files]);};
+  },50);
+}
+async function va_cargaMasiva(files){
+  if(!files.length)return;
+  const idsDisponibles=new Set(Object.keys(va_docsData));
+  const porSlot={};const sinIdentificar=[];
+  for(const f of files){
+    const id=va_clasificarArchivoPorNombre(f.name,idsDisponibles);
+    if(id){(porSlot[id]=porSlot[id]||[]).push(f);}
+    else sinIdentificar.push(f);
+  }
+  const resumenEl=document.getElementById('va-masiva-resumen');
+  if(resumenEl)resumenEl.innerHTML=`<div style="font-size:.8rem;color:#666">⏳ Leyendo ${files.length} archivo(s)…</div>`;
+  for(const [id,ff] of Object.entries(porSlot)){
+    const dd=va_docsData[id];dd.files=ff;dd.buffers=[];
+    for(const f of ff)dd.buffers.push(await f.arrayBuffer());
+    va_actualizarSlotUI(id);
+  }
+  const identificadosCount=files.length-sinIdentificar.length;
+  let h=`<div style="background:#eaf6ef;border-radius:7px;padding:8px 12px;font-size:.78rem;margin-bottom:8px">✅ ${identificadosCount}/${files.length} archivo(s) identificados y repartidos en sus casilleros abajo — revisalos antes de ejecutar.</div>`;
+  if(sinIdentificar.length){
+    h+=`<div style="background:#fffbea;border:1px solid #f0d060;border-radius:7px;padding:8px 12px;font-size:.78rem;color:#8a6d00">
+      ⚠ ${sinIdentificar.length} archivo(s) sin identificar por nombre — arrastralos a mano al casillero correcto abajo:<br>
+      ${sinIdentificar.map(f=>'• '+f.name).join('<br>')}
+    </div>`;
+  }
+  if(resumenEl)resumenEl.innerHTML=h;
 }
 
 // ── EXTRACT PDF TEXT (digital) ──
