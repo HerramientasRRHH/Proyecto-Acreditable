@@ -367,6 +367,55 @@ central para el tracking del trabajador de la página — en otros documentos
 (Previred, F30-1, etc.) un RUT perdido por esto no rompe nada porque se
 cruza el SET completo contra la nómina, no un RUT individual por página.
 
+## Paralelizar OCR por archivo: el patrón que sí se pudo probar, y el que no
+
+Se implementó paralelismo real (varios workers de Tesseract a la vez, cada
+uno tomando el SIGUIENTE archivo libre de una cola) para `va_validarLibroAsist`
+como piloto — quedan pendientes Contratos y Liquidaciones con el mismo
+patrón. Infraestructura nueva junto a `cargarOCR()`: `va_ocrPool` (array de
+workers), `va_cargarOCRPool(n)`, `va_procesarArchivosEnParalelo(items,
+poolSize,procesarUno)`.
+
+**El truco clave para no reescribir la lógica interna**: la función se separó
+en un `async function procesarArchivoX(buf,worker){ const ren_ocrWorker=worker;
+... }` — esa única línea de "shadow" (una `const` local con el MISMO nombre
+que la variable global `ren_ocrWorker`) hace que TODO el código de adentro
+(que ya usaba `ren_ocrWorker.recognize(...)` en varios lugares) automáticamente
+use el worker que le tocó a ESE archivo, sin tener que buscar y reemplazar
+cada referencia una por una. Bajo riesgo porque el cuerpo interno queda
+copiado tal cual, carácter por carácter — el único cambio real es la firma
+de la función y este shadow.
+
+**Qué SÍ se puede paralelizar así**: solo si no hay estado que dependa del
+ORDEN entre archivos distintos (`va_liqMap`, contadores compartidos como
+`totalPags`, `va_iaAuditLog` — todos son seguros entre tareas async
+concurrentes en JS de un solo hilo, no hace falta lock). Sí tiene que
+importar el orden DENTRO de un mismo archivo si ese archivo tiene estado
+pegajoso entre sus propias páginas (`tipoActual` en Contratos, `currentRut`/
+`enContratoHasta` en Liquidaciones) — por eso el patrón reparte ARCHIVOS
+completos por worker, nunca páginas sueltas de un mismo archivo.
+
+**No se pudo probar de punta a punta en el sandbox de Claude Code** — dos
+obstáculos reales, no simulados:
+1. El renderizado de PDF (`page.render()`) es anormalmente lento acá incluso
+   sin OCR de por medio (>30s por página), así que correr archivos reales
+   completos para medir tiempo no es viable.
+2. **`pdfjsLib.getDocument` no se puede sobreescribir/mockear** en este
+   entorno — `pdfjsLib.getDocument = miStub` no tira error pero tampoco
+   cambia nada (`pdfjsLib.getDocument !== miStub` después de la asignación,
+   confirmado directo en consola). Esto bloqueó armar un test rápido con
+   PDFs falsos para probar la lógica de reparto sin la lentitud del
+   renderizado real.
+
+Lo que SÍ se validó: (a) `va_procesarArchivosEnParalelo` reparte bien una
+cola de items entre N workers (probado con items sintéticos, sin PDF de por
+medio — todos los índices se procesan exactamente una vez, sin duplicados ni
+saltos); (b) con buffers inválidos reales, `procesarArchivoLibro` sí llega a
+llamar `pdfjsLib.getDocument` y maneja el error correctamente (confirmado
+agregando un log temporal adentro de la función, después removido). No se
+pudo confirmar el resultado final contra datos reales ni medir la mejora de
+velocidad — hace falta que el usuario lo corra real y reporte.
+
 ## Una corrida real en producción encontró 6 bugs que ninguna auditoría con datos de muestra había visto
 
 El usuario corrió el validador real (con su propia API key, en su propio

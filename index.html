@@ -2200,6 +2200,48 @@ async function cargarOCR(){
   });
 }
 
+// ── POOL de workers Tesseract (para procesar varios archivos EN PARALELO) ──
+// ren_ocrWorker (arriba) sigue siendo el worker único que usa el resto de la
+// app sin cambios. Este pool es aparte, solo para los módulos del Validador
+// Acreditable que se reescribieron para repartir archivos independientes
+// entre varios workers a la vez (Liquidaciones/Contratos/Libro Asistencia de
+// Antofagasta tienen cientos de páginas cada uno y antes se leían en fila,
+// una por una, con un solo worker). Los archivos SÍ son independientes entre
+// sí (cada Liquidación por letra, cada Contrato, cada foto del Libro no
+// depende de los demás para leerse) — lo único que hay que cuidar es que
+// nunca dos workers procesen el MISMO archivo a la vez, por eso el patrón de
+// abajo (va_procesarArchivosEnParalelo) reparte archivos completos por
+// worker, nunca páginas sueltas de un mismo archivo.
+let va_ocrPool=null;
+async function va_cargarOCRPool(n){
+  if(!window.Tesseract) await cargarOCR();
+  if(va_ocrPool&&va_ocrPool.length>=n) return va_ocrPool.slice(0,n);
+  const faltan=n-(va_ocrPool?va_ocrPool.length:0);
+  const nuevos=[];
+  for(let i=0;i<faltan;i++){
+    nuevos.push(await Tesseract.createWorker('spa',1,{logger:()=>{},langPath:'https://tessdata.projectnaptha.com/4.0.0_best'}));
+  }
+  va_ocrPool=(va_ocrPool||[]).concat(nuevos);
+  return va_ocrPool;
+}
+// Reparte una lista de "archivos" (buffers u otro item por archivo) entre un
+// pool de workers — cada worker toma el SIGUIENTE archivo libre de la cola
+// apenas termina el anterior (mejor balance que asignar archivos fijos por
+// worker, ya que no todos los archivos tienen la misma cantidad de páginas).
+// `procesarUno(item, worker)` debe ser la función que procesa UN archivo
+// completo (todas sus páginas, en orden) con el worker que le tocó.
+async function va_procesarArchivosEnParalelo(items,poolSize,procesarUno){
+  const pool=await va_cargarOCRPool(poolSize);
+  let siguiente=0;
+  async function consumidor(worker){
+    while(siguiente<items.length){
+      const miIdx=siguiente++;
+      await procesarUno(items[miIdx],worker,miIdx);
+    }
+  }
+  await Promise.all(pool.slice(0,poolSize).map(w=>consumidor(w)));
+}
+
 // Extraer texto de página — texto embebido primero, OCR como fallback
 async function extraerTextoPagina(pdfjsDoc,pageNum){
   const pg=await pdfjsDoc.getPage(pageNum);
@@ -13003,14 +13045,20 @@ async function va_validarLibroRem(){
 async function va_validarLibroAsist(){
   var dd=va_docsData['libroasist'];
   if(!dd||!dd.buffers||!dd.buffers.length){va_docResults['libroasist']={nombre:'Libro Asistencia',cargado:false,estado:'—'};return;}
-  if(!ren_ocrWorker){va_setProg(86,'⏳ Cargando OCR (primera vez, ~15s)…');await cargarOCR();}
   const iaKeyOk=!!(document.getElementById('iav-key')&&document.getElementById('iav-key').value);
   const TRABAJADOR_RE=/TRABAJADOR\s*S[RD]?[^A-Za-zÁÉÍÓÚÑáéíóúñ]{0,6}([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ\s]{3,40})/i;
   let totalPags=0,viaOCR=0,viaIA=0,sinIdentificar=0;
   const identificados=new Set();
-  for(const buf of dd.buffers){
+  // Antes: un solo worker, un archivo detrás de otro. Ahora: hasta 4 workers
+  // en paralelo, cada uno toma el SIGUIENTE archivo libre de la cola (los
+  // archivos por letra de Antofagasta son independientes entre sí — ninguno
+  // depende del orden de los demás para leerse bien). El código de adentro
+  // (por página) queda IDÉNTICO al de antes, solo que ahora corre dentro de
+  // esta función por-archivo en vez de directo en el for de arriba.
+  async function procesarArchivoLibro(buf,worker){
+    const ren_ocrWorker=worker; // shadow local: todo el bloque de abajo usa el worker que le tocó a ESTE archivo
     let pdf;
-    try{pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;}catch(e){console.warn('Libro Antofagasta: PDF inválido',e);continue;}
+    try{pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;}catch(e){console.warn('Libro Antofagasta: PDF inválido',e);return;}
     for(let p=1;p<=pdf.numPages;p++){
       totalPags++;
       if(totalPags%10===0) va_setProg(Math.min(86+Math.round(totalPags/10),89),`📅 Libro Asistencia: pág ${totalPags}`);
@@ -13070,6 +13118,8 @@ async function va_validarLibroAsist(){
       }
     }
   }
+  va_setProg(86,'⏳ Cargando OCR (paralelo)…');
+  await va_procesarArchivosEnParalelo(dd.buffers,Math.min(4,navigator.hardwareConcurrency||4),procesarArchivoLibro);
   const esperados=va_lhFiltered.filter(x=>!x.termino).length;
   const faltantes=va_lhFiltered.filter(x=>!x.termino&&!identificados.has(x.rutNorm));
   va_docResults['libroasist']={nombre:'Libro Asistencia',cargado:true,
