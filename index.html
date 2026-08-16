@@ -13000,8 +13000,10 @@ async function va_validarContratosAntofagasta(){
   // Detalle por trabajador (TODOS los nuevos, no solo los que faltan) — para
   // que el check ✅ se vea también en los que sí están, con la observación
   // diciendo si está firmado (pedido explícito: "el check si esta pero en
-  // la observación señale...", no solo listar los faltantes).
-  res.detalle=nuevosLH.map(x=>{
+  // la observación señale...", no solo listar los faltantes). OJO: va en un
+  // campo PROPIO (detalleTrabajadores), no en res.detalle — ese ya lo usaba
+  // el resto de la app (Resumen, etc.) como texto corto, no como lista.
+  res.detalleTrabajadores=nuevosLH.map(x=>{
     if(cubiertosSet.has(x.rutNorm))return{rut:x.rut,nombre:x.nombre,estado:'ok',obs:'Firmado completo — Contrato + Anexo Cargo + Anexo HHEE, ambas partes'};
     const inc=incompletos.find(i=>i.rut===x.rut);
     if(inc)return{rut:x.rut,nombre:x.nombre,estado:'incompleto',obs:inc.falta};
@@ -14549,11 +14551,11 @@ function va_renderContratosAntofagasta(){
     <div class="ch-kpi ok"><div class="v">${d.cubiertos}</div><div class="l">✅ Firmado completo</div></div>
     <div class="ch-kpi${d.faltantes.length?' err':''}"><div class="v">${d.faltantes.length}</div><div class="l">⚠ Incompleto/faltante</div></div>
   </div>`;
-  if(d.detalle&&d.detalle.length){
+  if(d.detalleTrabajadores&&d.detalleTrabajadores.length){
     const iconos={ok:'✅',incompleto:'⚠',faltante:'❌'};
     h+='<div class="ch-section-title">📋 Detalle por trabajador nuevo</div>';
     h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Observación</th></tr></thead><tbody>';
-    [...d.detalle].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
+    [...d.detalleTrabajadores].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
       const color=f.estado==='ok'?'#16613a':f.estado==='incompleto'?'#a07900':'#c0392b';
       h+=`<tr><td>${iconos[f.estado]||''}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="font-size:.72rem;color:${color}">${f.obs}</td></tr>`;
     });
@@ -14775,7 +14777,7 @@ function va_exportExcel(){
       var cor=[['Contratos — Resultado'],['Nuevos del período',dco.nuevos],['Firmado completo',dco.cubiertos],
         ['Incompleto/faltante',dco.faltantes.length],[],['DETALLE POR TRABAJADOR','','']];
       cor.push(['RUT','Nombre','Observación']);
-      (dco.detalle||[]).forEach(function(f){cor.push([f.rut,f.nombre,f.obs]);});
+      (dco.detalleTrabajadores||[]).forEach(function(f){cor.push([f.rut,f.nombre,f.obs]);});
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(cor),'Contratos');
     }
     // Libro Asistencia — hoja propia: el exportador genérico de abajo asume
