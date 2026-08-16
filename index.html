@@ -11310,7 +11310,7 @@ async function va_validarLiquidaciones(){
         const sortedYs=[...lineMap.keys()].sort((a,b)=>b-a);
         const lines=sortedYs.map(y=>lineMap.get(y).sort((a,b)=>a.x-b.x).map(i=>i.str).join(' '));
         let txt=lines.join('\n');
-        const textoUtil=txt.replace(/\s/g,'').length;
+        let textoUtil=txt.replace(/\s/g,'').length;
         // Fix 2: OCR si página escaneada (poco texto extractable)
         if(textoUtil<40&&ren_ocrWorker){
           try{
@@ -11320,7 +11320,7 @@ async function va_validarLiquidaciones(){
             await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
             const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
             const {data:{text}}=await ren_ocrWorker.recognize(blob);
-            if(text&&text.replace(/\s/g,'').length>20) txt=text;
+            if(text&&text.replace(/\s/g,'').length>20){txt=text;textoUtil=txt.replace(/\s/g,'').length;}
           }catch(ocrErr){console.warn('OCR p'+p+':',ocrErr);}
         }
         // ╔═══════════════════════════════════════════════════════════════════════╗
