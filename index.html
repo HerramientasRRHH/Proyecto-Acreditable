@@ -12887,7 +12887,6 @@ async function va_validarContratosAntofagasta(){
   va_docResults['contratos']=res;
   if(!dd||!dd.buffers||!dd.buffers.length){res.estado='⚪ No cargado';return;}
   res.cargado=true;
-  if(!ren_ocrWorker){va_setProg(84,'⏳ Cargando OCR (primera vez, ~15s)…');await cargarOCR();}
   const iaKeyOk=!!(document.getElementById('iav-key')&&document.getElementById('iav-key').value);
   const nuevosLH=va_lhFiltered.filter(x=>{
     if(!x.ingreso)return false;
@@ -12900,13 +12899,19 @@ async function va_validarContratosAntofagasta(){
   const EMP_LABEL_RE=/EMPLEADOR|AKRO|DISE.OS/i;
   const cubiertosSet=new Set();
   const incompletos=[];
-  for(let bi=0;bi<dd.buffers.length;bi++){
-    const buf=dd.buffers[bi];
-    const fname=(dd.files[bi]&&dd.files[bi].name)||'';
+  // Igual patrón que Libro Asistencia: cada archivo de Contrato es
+  // independiente de los demás (el estado pegajoso "tipoActual" es SOLO
+  // dentro de un mismo archivo, entre sus propias páginas — por eso el
+  // archivo entero, con sus páginas en orden, va a UN solo worker del pool).
+  // "ocrW" (no "worker") para no chocar con la variable "worker" de abajo,
+  // que ya se usaba para el trabajador de la nómina matcheado por nombre.
+  async function procesarArchivoContrato(item,ocrW){
+    const ren_ocrWorker=ocrW; // shadow local: todo el bloque de abajo usa el worker que le tocó a ESTE archivo
+    const buf=item.buf,fname=item.fname;
     const nombreArchivo=fname.replace(/\.pdf$/i,'').replace(/^Contrato\s+de\s+[Tt]rabajo\s+(de\s+)?/i,'').trim();
-    if(!nombreArchivo)continue;
+    if(!nombreArchivo)return;
     const worker=va_matchNombreNomina(nombreArchivo,nuevosLH);
-    if(!worker)continue; // no matchea con ningún nuevo ingreso del período — no es un caso a exigir acá
+    if(!worker)return; // no matchea con ningún nuevo ingreso del período — no es un caso a exigir acá
     const docs={};
     VA_CONTRATO_TIPOS.forEach(t=>docs[t]={presente:false,firmaTrab:false,firmaEmp:false});
     let tipoActual=null;
@@ -12993,6 +12998,9 @@ async function va_validarContratosAntofagasta(){
       incompletos.push({rut:worker.rut,nombre:worker.nombre,falta:detalles.join(' · ')});
     }
   }
+  const itemsContratos=dd.buffers.map((buf,bi)=>({buf,fname:(dd.files[bi]&&dd.files[bi].name)||''}));
+  va_setProg(84,'⏳ Cargando OCR (paralelo)…');
+  await va_procesarArchivosEnParalelo(itemsContratos,Math.min(4,navigator.hardwareConcurrency||4),procesarArchivoContrato);
   const sinArchivo=nuevosLH.filter(x=>!cubiertosSet.has(x.rutNorm)&&!incompletos.some(i=>i.rut===x.rut));
   res.cubiertos=cubiertosSet.size;
   res.faltantes=[...incompletos,...sinArchivo.map(x=>({rut:x.rut,nombre:x.nombre,falta:'archivo de contrato'}))];
