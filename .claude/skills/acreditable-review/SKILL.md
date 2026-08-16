@@ -367,6 +367,77 @@ central para el tracking del trabajador de la página — en otros documentos
 (Previred, F30-1, etc.) un RUT perdido por esto no rompe nada porque se
 cruza el SET completo contra la nómina, no un RUT individual por página.
 
+## Una corrida real en producción encontró 6 bugs que ninguna auditoría con datos de muestra había visto
+
+El usuario corrió el validador real (con su propia API key, en su propio
+navegador) contra Antofagasta completo y bajó el Excel exportado — comparar
+ESE Excel real contra lo que la app mostraba en pantalla (screenshot) destapó
+varios bugs que las auditorías anteriores (con muestras chicas, o simulando
+en Python) no habían agarrado. Lección: una corrida completa real, con
+export a Excel, encuentra clases de bug que una muestra no encuentra —
+sobre todo bugs de "cablear el número equivocado" que no dependen de que el
+OCR/IA lea bien o mal.
+
+1. **RUT normalizado con dos formatos incompatibles en la misma función**
+   (`va_validarImput`): un normalizador LOCAL sacaba el guión
+   ("123456789") mientras el resto de la app usa `va_normRut` que lo
+   mantiene ("12345678-9") — el cruce daba 0% de coincidencia SIEMPRE,
+   aunque ambos lados tuvieran los mismos RUT reales. Cuando una función
+   define su PROPIO normalizador de RUT en vez de reusar `va_normRut`,
+   sospechá de esto primero si el cruce da un 0% sospechoso con datos que a
+   simple vista deberían calzar.
+2. **`XLSX.read()` no lanza excepción con un buffer que NO es Excel** — en
+   `va_validarMujeres`, el patrón "probar como Excel, si tira error caer a
+   OCR de PDF" nunca caía al OCR real porque SheetJS lee un PDF sin fallar
+   y devuelve un workbook vacío/basura. Con un slot que acepta más de un
+   tipo de archivo (`.pdf,.xlsx,.xls`), decidí SIEMPRE por la extensión real
+   del archivo (`dd.files[i].name`), nunca por si una librería permisiva
+   tira o no una excepción.
+3. **Bug de orden en una cadena de `else if` de dispatch de tabs**
+   (`va_subtab`): había un `else if(['jubilados','librorem','libroasist',
+   'mujeres','discapacidad'].includes(tab)...)` que agarraba 'libroasist'
+   ANTES de que la rama específica de Antofagasta (unas líneas más abajo)
+   pudiera evaluarse — así que el módulo de Libro Asistencia de Antofagasta
+   se renderizaba con la función GENÉRICA (`va_renderAntTab`, campos
+   `pagsEsperadas`/`ratio` que ni existen en ese resultado) en vez de la
+   dedicada (`va_renderAntofagastaLibroDetalle`, campos reales
+   `esperados`/`totalPags`/`identificados`) — de ahí el "0 páginas
+   esperadas · 0% cobertura" en pantalla mientras el texto de nota (que sí
+   usa el campo correcto `nota`) mostraba los números reales al lado. Ante
+   un KPI en 0 que contradice el texto de la misma tarjeta, sospechá
+   SIEMPRE de un problema de qué función renderiza, no de qué encontró la
+   validación — son cosas separadas y hay que confirmar cuál función
+   realmente corrió.
+4. **El exportador de Excel genérico para los "otros documentos de
+   Antofagasta" asume la forma `{rutsDoc,rutsLH,coincidencia}`** de un
+   cruce por RUT — pero Libro Asistencia matchea por NOMBRE (OCR/IA), su
+   resultado tiene campos totalmente distintos (`esperados`,
+   `identificados`, `totalPags`). El exportador genérico caía en sus
+   fallbacks (`dd.totalPags||0`, `dd.coincidencia||dd.cubiertos||0` → 0) y
+   sacaba "RUTs en doc: 338, Coincidencia: 0" con datos reales sanos atrás.
+   Cuando un módulo no calce con la forma que asume un exportador/render
+   genérico, dale hoja/función propia en vez de forzarlo a los mismos
+   nombres de campo.
+5. **Exención de Cotizar y Jubilados daban números DISTINTOS para
+   poblaciones que deberían ser casi la misma** — resultó que el usuario
+   había cargado el Impositivo.pdf en el slot separado 'exencion' (que
+   YA habíamos decidido, en una sesión anterior, que no hace falta para
+   Antofagasta — está cubierto por Jubilados). Se sacó el slot 'exencion'
+   de la config de Antofagasta directamente, para que no quede la opción de
+   volver a cargar ahí un archivo que después confunde comparando contra
+   otro módulo que en teoría mide lo mismo.
+6. **Tesseract.js usa por defecto el paquete de idioma "fast" (liviano,
+   menos preciso)**, no "best" — nunca se había configurado explícitamente.
+   Dado que este proyecto lee manuscritos y escaneos de mala calidad todo
+   el tiempo, se cambió a `langPath:'https://tessdata.projectnaptha.com/4.0.0_best'`
+   en `cargarOCR()`. Es un cambio barato (una línea) con impacto
+   potencialmente amplio — sospechá de esto como causa raíz compartida
+   cuando VARIOS módulos distintos "no leen bien" al mismo tiempo con
+   documentos que en una prueba con Python (que usa el Tesseract nativo,
+   normalmente con el paquete "best" del sistema) sí leían bien. No se pudo
+   medir la mejora real de precisión en el sandbox de Claude Code — hay que
+   confirmarlo con una corrida real del usuario.
+
 ## Corriendo una auditoría de prueba completa: usa Python, no el navegador sandbox
 
 Se intentó correr `va_ejecutar()` completo en el navegador sandbox de Claude

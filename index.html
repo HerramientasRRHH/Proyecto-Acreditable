@@ -2180,7 +2180,11 @@ async function cargarOCR(){
     s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
     s.onload=async()=>{
       try{
-        ren_ocrWorker=await Tesseract.createWorker('spa',1,{logger:()=>{}});
+        // langPath: por defecto Tesseract.js usa el paquete de idioma "fast"
+        // (más liviano, menos preciso) — para el Validador Acreditable
+        // (manuscritos, escaneos de mala calidad) usamos el paquete "best"
+        // (más pesado en la primera carga, bastante más preciso).
+        ren_ocrWorker=await Tesseract.createWorker('spa',1,{logger:()=>{},langPath:'https://tessdata.projectnaptha.com/4.0.0_best'});
         document.getElementById('ocrStatus').textContent='✅ OCR listo';
         resolve(true);
       }catch(e){
@@ -10572,8 +10576,7 @@ const VA_BASES={
       {id:'f301carta',label:'Carta F30-1',icon:'📝',accept:'.pdf',multi:false,tip:'Opcional — justifica faltantes'},
       {id:'previred',label:'G · PreviRed',icon:'💰',accept:'.pdf',multi:true,tip:'Comprobante Pago Cotizaciones — incluye acá también el Impositivo.pdf de la misma carpeta'},
       {id:'finiq',label:'H · Finiquitos',icon:'📑',accept:'.pdf',multi:true,tip:'PDF unificado'},
-      {id:'jubilados',label:'H · Listado Jubilados',icon:'👴',accept:'.pdf',multi:false,tip:'Listado tabular de jubilados'},
-      {id:'exencion',label:'H · Exención Cotizar',icon:'📜',accept:'.pdf',multi:true,tip:'Formularios exención AFP'},
+      {id:'jubilados',label:'H · Listado Jubilados',icon:'👴',accept:'.pdf',multi:false,tip:'Listado tabular de jubilados — ya cubre la exención de cotizar, no hace falta un documento aparte'},
       {id:'anexos',label:'H · Anexos Reemplazos',icon:'🔁',accept:'.pdf',multi:false,tip:'Anexos de reemplazo escaneados'},
       {id:'contratos',label:'H · Contratos',icon:'📝',accept:'.pdf',multi:true,tip:'Incluye Anexo cargo, Pacto HHEE'},
       {id:'liq',label:'H · Liquidaciones',icon:'📄',accept:'.pdf',multi:true,tip:'PDF unificado o varios'},
@@ -12055,10 +12058,10 @@ async function va_validarFiniquitos(){
   const detalle=finiqLH.map(x=>{
     let estado,detalleTxt;
     if(!ruts.has(x.rutNorm)){estado='faltante';detalleTxt='Sin finiquito en el PDF';}
-    else if(legalizados.has(x.rutNorm)){estado='legalizado';detalleTxt='Notariado (ratificado ante notario)';}
-    else if(respaldados.has(x.rutNorm)){estado='respaldo';detalleTxt=tipoPorRut.get(x.rutNorm)||'Con respaldo alternativo';}
-    else if(cartaPendienteRuts.has(x.rutNorm)){estado='cartaPendiente';detalleTxt='Según carta a la Municipalidad: no se ha acercado a notaría a firmar (pendiente)';}
-    else{estado='sinrespaldo';detalleTxt='Sin notaría ni respaldo alternativo detectado';}
+    else if(legalizados.has(x.rutNorm)){estado='legalizado';detalleTxt='Legalizado (ratificado ante notario)';}
+    else if(respaldados.has(x.rutNorm)){estado='respaldo';detalleTxt='No legalizado, pero con '+(tipoPorRut.get(x.rutNorm)||'respaldo alternativo');}
+    else if(cartaPendienteRuts.has(x.rutNorm)){estado='cartaPendiente';detalleTxt='No legalizado — según carta a la Municipalidad, no se ha acercado a notaría a firmar (pendiente)';}
+    else{estado='sinrespaldo';detalleTxt='No legalizado y sin respaldo alternativo detectado';}
     return{rut:x.rut,nombre:x.nombre,estado,detalle:detalleTxt};
   });
   va_docResults['finiq']={nombre:'3.3 Finiquitos',cargado:true,totalLH:finiqLH.length,cubiertos:cubiertos.length,
@@ -12568,7 +12571,11 @@ async function va_validarImput(){
   try{wb=XLSX.read(buf,{type:'array',cellDates:true,raw:false});}
   catch(e){va_docResults['imput']={nombre:'IMPUT Nómina',cargado:true,estado:'❌',error:'No se pudo leer el Excel: '+e.message};return;}
   var sn=wb.SheetNames;
-  var normR=function(r){return String(r||'').replace(/\./g,'').replace(/-/g,'').replace(/\s/g,'').toUpperCase().trim();};
+  // OJO: antes esto normalizaba SIN el guión ("123456789") mientras que
+  // va_lhFiltered usa va_normRut ("12345678-9", con guión) — nunca podían
+  // coincidir como claves de Map/Set, por eso el cruce daba 0% siempre
+  // aunque IMPUT y LH tuvieran prácticamente los mismos RUT reales.
+  var normR=function(r){return va_normRut(r);};
   var result={nombre:'IMPUT Nómina',cargado:true,hojas:sn,matriz:null,contratos:null,finiquitados:null,jubilados:null,licencias:null};
 
   // ── MATRIZ: buscar hoja con lista completa (MATRIZ, Hoja2, o la que tenga más filas con RUT) ──
@@ -12948,6 +12955,16 @@ async function va_validarContratosAntofagasta(){
   res.cubiertos=cubiertosSet.size;
   res.faltantes=[...incompletos,...sinArchivo.map(x=>({rut:x.rut,nombre:x.nombre,falta:'archivo de contrato'}))];
   res.estado=res.faltantes.length===0?'✅':'⚠';
+  // Detalle por trabajador (TODOS los nuevos, no solo los que faltan) — para
+  // que el check ✅ se vea también en los que sí están, con la observación
+  // diciendo si está firmado (pedido explícito: "el check si esta pero en
+  // la observación señale...", no solo listar los faltantes).
+  res.detalle=nuevosLH.map(x=>{
+    if(cubiertosSet.has(x.rutNorm))return{rut:x.rut,nombre:x.nombre,estado:'ok',obs:'Firmado completo — Contrato + Anexo Cargo + Anexo HHEE, ambas partes'};
+    const inc=incompletos.find(i=>i.rut===x.rut);
+    if(inc)return{rut:x.rut,nombre:x.nombre,estado:'incompleto',obs:inc.falta};
+    return{rut:x.rut,nombre:x.nombre,estado:'faltante',obs:'Sin archivo de contrato'};
+  });
   res.detalle=`${cubiertosSet.size}/${nuevosLH.length} nuevos con los 3 documentos (Contrato + Anexo Cargo + Anexo HHEE) firmados por ambas partes`;
 }
 
@@ -13096,11 +13113,22 @@ async function va_validarMujeres(){
   var dd=va_docsData['mujeres'];
   if(!dd||!dd.buffers||!dd.buffers.length){va_docResults['mujeres']={nombre:'Acreditación Mujeres',cargado:false,estado:'—'};return;}
   var ruts=new Set();
-  for(var b of dd.buffers){
-    try{var wb2=XLSX.read(b,{type:'array'});
-      wb2.SheetNames.forEach(function(sn2){var rows=XLSX.utils.sheet_to_json(wb2.Sheets[sn2],{header:1,defval:null});
-        rows.forEach(function(row){if(row)row.forEach(function(cell){if(cell)va_findAllRuts(String(cell)).forEach(function(r){ruts.add(r);});});});});
-    }catch(e){va_findAllRuts(await va_getPdfTextOCR(b,20)).forEach(function(r){ruts.add(r);});}
+  for(var bi=0;bi<dd.buffers.length;bi++){
+    var b=dd.buffers[bi];
+    // OJO: XLSX.read() en un buffer de PDF NO tira excepción — SheetJS es
+    // permisivo y devuelve un workbook vacío/basura en vez de fallar, así
+    // que el try/catch de acá abajo nunca caía al OCR del PDF y siempre
+    // salía "0 RUT en doc" con archivos reales en PDF. Hay que decidir por
+    // extensión del archivo, no por si XLSX.read() lanza error o no.
+    var esExcel=/\.xlsx?$/i.test((dd.files[bi]&&dd.files[bi].name)||'');
+    if(esExcel){
+      try{var wb2=XLSX.read(b,{type:'array'});
+        wb2.SheetNames.forEach(function(sn2){var rows=XLSX.utils.sheet_to_json(wb2.Sheets[sn2],{header:1,defval:null});
+          rows.forEach(function(row){if(row)row.forEach(function(cell){if(cell)va_findAllRuts(String(cell)).forEach(function(r){ruts.add(r);});});});});
+      }catch(e){console.warn('Mujeres: error leyendo Excel',e);}
+    }else{
+      va_findAllRuts(await va_getPdfTextOCR(b,20)).forEach(function(r){ruts.add(r);});
+    }
   }
   dd.rutsFound=ruts;
   var mujeresLH=va_lhFiltered.filter(function(x){return x.sexo==='F'||x.sexo==='FEMENINO';});
@@ -13769,10 +13797,10 @@ function va_subtab(tab){
   else if(tab==='libro') c.innerHTML=va_renderLibroDetalle();
   else if(tab==='f30') c.innerHTML=va_renderF30();
   else if(tab==='imput') c.innerHTML=va_renderImput();
-  else if(['jubilados','librorem','libroasist','mujeres','discapacidad'].includes(tab)&&va_baseKey!=='Vitacura') c.innerHTML=va_renderAntTab(tab);
   else if(tab==='libroasist'&&va_baseKey==='Vitacura') c.innerHTML=va_renderVitacuraLibroAsist();
   else if(tab==='libroasist'&&va_baseKey==='Antofagasta') c.innerHTML=va_renderAntofagastaLibroDetalle();
   else if(tab==='libroasist') c.innerHTML=va_renderAntTab(tab);
+  else if(['jubilados','librorem','mujeres','discapacidad'].includes(tab)&&va_baseKey!=='Vitacura') c.innerHTML=va_renderAntTab(tab);
   else if(tab==='anexos') c.innerHTML=va_renderAnexos();
   else if(tab==='cartanofirma') c.innerHTML=va_renderCartaNoFirma();
   else if(tab==='nominas') c.innerHTML=va_renderNominas();
@@ -13790,7 +13818,7 @@ function va_renderLiq(){
     .sort((a,b) => (a.nombre||'').localeCompare(b.nombre||'','es',{sensitivity:'base'}));
   const menos30list = sorted.filter(x => x.caso==='MENOS_30');
   let h = `<div style="margin-bottom:10px;font-size:.78rem;color:#555">
-    <strong>${va_liqMap.size}</strong> liquidaciones detectadas en PDF — <strong>${va_lhFiltered.filter(x=>!x.termino).length}</strong> esperadas en LH (activos + 0 días)
+    <strong>${va_liqMap.size}</strong> liquidaciones detectadas en PDF — <strong>${va_lhFiltered.filter(x=>!x.termino).length}</strong> esperadas en LH (todos los que no tienen Fecha Término, no solo los con haberes)
     · <span style="color:#888">ordenado alfabéticamente</span>
   </div>`;
   if(va_iaDiag){
@@ -13820,10 +13848,13 @@ function va_renderLiq(){
       docsFaltReal = r.docsFalt.filter(d => d !== 'Comprobante de pago' && !d.includes('inline'));
       docsOkReal = [...r.docsOk, 'Firma validada manualmente'];
     } else if(liqData && liqData.pendOverride){
-      // pendOverride: OK auto bajado a revisión — mostrar como SIN_FIRMA
+      // pendOverride: la detección automática SÍ encontró algo (por eso el
+      // check se mantiene) — lo que cambia es que un humano lo bajó a
+      // revisión manual, y esa distinción va en la observación, no
+      // tapando el check con una advertencia (pedido explícito del usuario).
       casoReal = 'SIN_FIRMA';
-      estadoReal = '⚠';
-      msgReal = 'En revisión manual (era: ' + r.msg + ')';
+      estadoReal = '✅';
+      msgReal = 'Pendiente de revisión manual (detección automática decía: ' + r.msg + ')';
     }
     const bg = estadoReal==='❌' ? 'background:#fdecea' : (estadoReal==='⚠' ? 'background:#fffbea' : '');
     const docsHtml = docsFaltReal.length
@@ -14468,17 +14499,20 @@ function va_renderContratosAntofagasta(){
     <div class="ch-kpi ok"><div class="v">${d.cubiertos}</div><div class="l">✅ Firmado completo</div></div>
     <div class="ch-kpi${d.faltantes.length?' err':''}"><div class="v">${d.faltantes.length}</div><div class="l">⚠ Incompleto/faltante</div></div>
   </div>`;
-  if(d.faltantes.length){
-    h+='<div class="ch-section-title" style="color:#c0392b">⚠ Nuevos ingresos con Contrato incompleto o sin archivo</div>';
-    h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th><th>Falta</th></tr></thead><tbody>';
-    [...d.faltantes].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
-      h+=`<tr><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="font-size:.72rem;color:#c0392b">${f.falta}</td></tr>`;
+  if(d.detalle&&d.detalle.length){
+    const iconos={ok:'✅',incompleto:'⚠',faltante:'❌'};
+    h+='<div class="ch-section-title">📋 Detalle por trabajador nuevo</div>';
+    h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Observación</th></tr></thead><tbody>';
+    [...d.detalle].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
+      const color=f.estado==='ok'?'#16613a':f.estado==='incompleto'?'#a07900':'#c0392b';
+      h+=`<tr><td>${iconos[f.estado]||''}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="font-size:.72rem;color:${color}">${f.obs}</td></tr>`;
     });
     h+='</tbody></table>';
-  }else{
+  }else if(d.faltantes.length===0){
     h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los nuevos ingresos tienen Contrato firmado por ambas partes</div>';
   }
-  h+=va_renderIAAuditSection('Contrato (Antofagasta)');
+  h+='<details style="margin-top:14px"><summary style="font-size:.76rem;color:#888;cursor:pointer">🔍 Ver lectura página por página con IA (detalle técnico)</summary>'
+    +va_renderIAAuditSection('Contrato (Antofagasta)')+'</details>';
   return h;
 }
 
@@ -14684,9 +14718,36 @@ function va_exportExcel(){
         di.finiquitados.detalle.forEach(function(r){ir.push([r.rut,r.nombre,r.firma]);});}
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(ir),'IMPUT');
     }
+    // Contratos — no tenía hoja propia en el export (se veía en la app pero
+    // no salía en el Excel).
+    var dco=va_docResults['contratos'];
+    if(dco&&dco.cargado){
+      var cor=[['Contratos — Resultado'],['Nuevos del período',dco.nuevos],['Firmado completo',dco.cubiertos],
+        ['Incompleto/faltante',dco.faltantes.length],[],['DETALLE POR TRABAJADOR','','']];
+      cor.push(['RUT','Nombre','Observación']);
+      (dco.detalle||[]).forEach(function(f){cor.push([f.rut,f.nombre,f.obs]);});
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(cor),'Contratos');
+    }
+    // Libro Asistencia — hoja propia: el exportador genérico de abajo asume
+    // la forma {rutsDoc,rutsLH,coincidencia} de un cruce por RUT, pero acá el
+    // match es por NOMBRE (OCR/IA), no por RUT — con los nombres genéricos
+    // caía siempre en 0/0 aunque el módulo hubiera identificado bien.
+    var dla=va_docResults['libroasist'];
+    if(dla&&dla.cargado){
+      var lar=[['Libro Asistencia — Resultado'],['Estado',dla.estado],
+        ['Trabajadores LH esperados',dla.esperados],['Identificados',dla.identificados],
+        ['Vía OCR (gratis)',dla.viaOCR],['Vía IA',dla.viaIA],
+        ['Páginas totales',dla.totalPags],['Páginas sin identificar a nadie',dla.sinIdentificar],[]];
+      if((dla.faltantes||[]).length){lar.push(['SIN LIBRO IDENTIFICADO','']);dla.faltantes.forEach(function(f){lar.push([f.rut,f.nombre]);});}
+      if(dla.carta&&dla.carta.cargada&&(dla.carta.filas||[]).length){
+        lar.push([],['CARTA FE DE ERRATAS — correcciones explicadas','']);lar.push(['RUT','Detalle']);
+        dla.carta.filas.forEach(function(f){lar.push([f.rut,f.texto]);});
+      }
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(lar),'LibroAsist');
+    }
     // Other Antofagasta docs
-    var antDocs=['jubilados','anexos','cartanofirma','librorem','libroasist','mujeres','discapacidad'];
-    var antNames={jubilados:'Jubilados',anexos:'Reemplazos',cartanofirma:'CartaNoFirma',librorem:'LibroRem',libroasist:'LibroAsist',mujeres:'Mujeres',discapacidad:'Discapacidad'};
+    var antDocs=['jubilados','anexos','cartanofirma','librorem','mujeres','discapacidad'];
+    var antNames={jubilados:'Jubilados',anexos:'Reemplazos',cartanofirma:'CartaNoFirma',librorem:'LibroRem',mujeres:'Mujeres',discapacidad:'Discapacidad'};
     for(var ai=0;ai<antDocs.length;ai++){
       var docId=antDocs[ai];var dd=va_docResults[docId];
       if(!dd||!dd.cargado)continue;
