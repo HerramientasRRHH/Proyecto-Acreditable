@@ -246,6 +246,38 @@ por carpeta contra documentos reales, ninguna se ve leyendo el código solo:
   hay que revisarlo cada vez que se agrega una función nueva para un slot
   que ya existía).
 
+## Rendimiento: buscá OCR duplicado antes de pensar en paralelizar
+
+El usuario reportó Antofagasta tardando más de una hora en su navegador
+real. Antes de saltar a algo grande (pool de workers Tesseract en paralelo),
+grepeá `textoUtil`/`txtLen` en la función sospechosa: si la variable que
+decide "¿hace falta OCR/otro OCR acá?" se declara `const` a partir del texto
+NATIVO del PDF y nunca se actualiza después de que el OCR tiene éxito,
+cualquier chequeo posterior que la reuse (ej. una "red de seguridad" pensada
+para un subconjunto chico de páginas, como licencia médica) va a disparar en
+TODAS las páginas escaneadas, no solo las que de verdad lo necesitan — un
+doble OCR completo (render + recognize) silencioso y sistemático. Así se
+encontró en `va_validarLiquidaciones` (409 páginas en Antofagasta, la red de
+seguridad de Licencia Médica se disparaba en casi todas). El fix es trivial
+(`const`→`let`, reasignar tras el OCR) y CERO riesgo para los resultados —
+no toca ninguna clasificación ni detección, solo evita repetir OCR ya hecho.
+`va_validarLicenciasMedicas` ya usaba `let txtLen` correctamente — sirve de
+referencia de cómo se ve el patrón bien hecho.
+
+Lo que SÍ queda pendiente y es una mejora más grande (no se intentó esta
+sesión): todo el pipeline usa un único `ren_ocrWorker` (un solo worker
+Tesseract), así que el OCR está 100% serializado aunque distintos ARCHIVOS
+sean independientes entre sí (cada archivo de Liquidaciones/Contrato/Libro
+resetea su propio estado pegajoso — `currentRut`, `tipoActual` — al empezar,
+así que los archivos SÍ se podrían procesar en paralelo entre ellos, aunque
+las páginas DENTRO de un mismo archivo deban seguir en orden). Un pool de
+2-4 workers Tesseract + correr los archivos de un mismo slot con
+`Promise.all` en vez de un `for` secuencial podría dar una mejora real
+adicional — pero no se implementó porque el navegador sandbox de Claude Code
+resultó tener renderizado de PDF anormalmente lento incluso SIN OCR de por
+medio (>30s para renderizar una sola página), así que no hay forma de medir
+ni validar el cambio acá — haría falta probarlo en un navegador real.
+
 ## Alcance
 
 Este proceso aplica a cualquier lectura con IA en este proyecto, no solo
