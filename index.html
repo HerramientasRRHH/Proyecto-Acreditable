@@ -11276,10 +11276,11 @@ async function va_onDocFile(id,inp){
 // Orden importa: los patrones más específicos van ANTES que su versión
 // genérica (ej. F30-1 antes que F30, si no "F30-1.pdf" matchearía como F30).
 const VA_PATRONES_ARCHIVO=[
-  {id:'f301carta',pats:[/CARTA.*F ?30.?1|F ?30.?1.*CARTA/]},
-  {id:'f301',pats:[/F ?30.?1/]},
-  {id:'f30',pats:[/\bF ?30\b/]},
-  {id:'previred',pats:[/PREVIRED/,/IMPOSIT/]},
+  {id:'f301carta',pats:[/CARTA.*F[ -]?30.?1|F[ -]?30.?1.*CARTA/]},
+  {id:'f301',pats:[/F[ -]?30[ -]?1/,/CERTIFICADO.*CUMPLIMIENTO.*OBLIGACION/]},
+  {id:'f30',pats:[/\bF[ -]?30\b/,/CERTIFICADO.*ANTECEDENTES.*LABORAL/]},
+  {id:'previred',pats:[/PREVIRED/,/IMPOSIT/,/PLANILLA.*COTIZACION/,/COTIZACION.*LABORAL.*PREVISIONAL/]},
+  {id:'nomina',pats:[/\bNOMINA\b/]},
   {id:'finiq',pats:[/FINIQUITO/]},
   {id:'jubilados',pats:[/JUBILAD/]},
   {id:'exencion',pats:[/EXENCION/]},
