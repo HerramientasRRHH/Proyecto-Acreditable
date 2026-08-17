@@ -10600,7 +10600,7 @@ const VA_BASES={
       {id:'contratos',label:'P · Contratos',icon:'📝',accept:'.pdf',multi:true,tip:'PDF unificado o varios'},
       {id:'finiq',label:'P · Finiquitos',icon:'📑',accept:'.pdf',multi:true,tip:'PDF unificado o varios'},
       {id:'exencion',label:'Exención Cotizar',icon:'👴',accept:'.pdf',multi:true,tip:'Formularios exención AFP jubilados'},
-      {id:'licencias',label:'Licencias Médicas',icon:'🏥',accept:'.pdf',multi:true,tip:'Listado + licencias'},
+      {id:'licencias',label:'Licencias Médicas',icon:'🏥',accept:'.pdf,.oxps',multi:true,tip:'Listado + licencias'},
       {id:'sub_lh',label:'O · LH Subcontrato',icon:'📗',accept:'.xlsx,.xls',multi:false,tip:'Libro de Haberes del subcontrato — se cruza de forma independiente'},
       {id:'sub_f30',label:'O · F30 Sub',icon:'📋',accept:'.pdf',multi:false,tip:'F30 subcontrato'},
       {id:'sub_f301',label:'O · F30-1 Sub',icon:'📋',accept:'.pdf',multi:false,tip:'F30-1 subcontrato'},
@@ -10628,9 +10628,9 @@ const VA_BASES={
       {id:'libroasist_carta',label:'J · Carta Fe de Erratas',icon:'📝',accept:'.pdf,.docx',multi:false,tip:'Opcional — explica correcciones/anotaciones del Libro (RUT + motivo)'},
       {id:'mujeres',label:'K · Acreditación Mujeres',icon:'👩',accept:'.pdf,.xlsx,.xls',multi:false,tip:'Listado/nómina de mujeres'},
       {id:'discapacidad',label:'K · Personal Discapacitado',icon:'♿',accept:'.pdf',multi:false,tip:'Listado + certificados'},
-      {id:'licencias',label:'M · Licencias Médicas',icon:'🏥',accept:'.pdf',multi:true,tip:'Listado + licencias'}]},
+      {id:'licencias',label:'M · Licencias Médicas',icon:'🏥',accept:'.pdf,.oxps',multi:true,tip:'Listado + licencias'}]},
   'Mejillones':{sectores:{'Base única':'Barrido Mejillones 2025-2028'},
-    docs:[{id:'liq',label:'Liquidaciones',icon:'📄',accept:'.pdf',multi:true,tip:''},{id:'f30',label:'F30+F30-1',icon:'📋',accept:'.pdf',multi:false,tip:''},{id:'previred',label:'PreviRed',icon:'💰',accept:'.pdf',multi:false,tip:''},{id:'finiq',label:'Finiquitos',icon:'📑',accept:'.pdf',multi:true,tip:''},{id:'contratos',label:'Contratos',icon:'📝',accept:'.pdf',multi:true,tip:''},{id:'licencias',label:'Licencias',icon:'🏥',accept:'.pdf',multi:true,tip:''},{id:'exencion',label:'Exención Cotizar',icon:'👴',accept:'.pdf',multi:true,tip:''}]},
+    docs:[{id:'liq',label:'Liquidaciones',icon:'📄',accept:'.pdf',multi:true,tip:''},{id:'f30',label:'F30+F30-1',icon:'📋',accept:'.pdf',multi:false,tip:''},{id:'previred',label:'PreviRed',icon:'💰',accept:'.pdf',multi:false,tip:''},{id:'finiq',label:'Finiquitos',icon:'📑',accept:'.pdf',multi:true,tip:''},{id:'contratos',label:'Contratos',icon:'📝',accept:'.pdf',multi:true,tip:''},{id:'licencias',label:'Licencias',icon:'🏥',accept:'.pdf,.oxps',multi:true,tip:''},{id:'exencion',label:'Exención Cotizar',icon:'👴',accept:'.pdf',multi:true,tip:''}]},
   'Las Condes':{sectores:{'Sector 1':'Las Condes Sector 1 2024-2027','Sector 2':'Las Condes Sector 2 2024-2027','Transversal':'Las Condes Sector Transversal 2024-2027'},
     docs:[{id:'liq',label:'Liquidaciones',icon:'📄',accept:'.pdf',multi:true,tip:''},{id:'f30',label:'F30',icon:'📋',accept:'.pdf',multi:false,tip:''},{id:'f301',label:'F30-1',icon:'📋',accept:'.pdf',multi:false,tip:''},{id:'previred',label:'PreviRed',icon:'💰',accept:'.pdf',multi:false,tip:''},{id:'finiq',label:'Finiquitos',icon:'📑',accept:'.pdf',multi:true,tip:''},{id:'contratos',label:'Contratos+CI',icon:'📝',accept:'.pdf',multi:true,tip:''},{id:'nomina',label:'Nóminas',icon:'📊',accept:'.xlsx,.xls',multi:true,tip:''},{id:'exencion',label:'Exención Cotizar',icon:'👴',accept:'.pdf',multi:true,tip:''}]}
 };
@@ -11466,6 +11466,36 @@ async function va_readDocxText(buf){
     return parts.join(' ').replace(/ *\n */g,'\n').replace(/&amp;/g,'&');
   }catch(e){console.warn('DOCX read error:',e);return '';}
 }
+// ── Lectura de .oxps/.xps (XPS Document, formato de impresión de Windows) ──
+// Encontrado en un caso real: "Listado de licencia medica.oxps" -- el listado
+// TABULAR completo (RUT+nombre+fechas+días, texto limpio) que el usuario
+// exportó en este formato en vez de PDF. Antes era 100% invisible para el
+// validador (el input solo aceptaba .pdf) -- el listado real vivía en un
+// archivo que la app ni siquiera podía seleccionar. Igual que .docx, un
+// .oxps/.xps es un ZIP: cada página es un archivo Documents/N/Pages/M.fpage
+// (XML), y el texto vive en el atributo UnicodeString="..." de cada
+// <Glyphs> (no hay tags <w:t> como en Word, es un formato de layout de
+// impresión distinto). Confirmado con el archivo real: 3 páginas, texto
+// nativo limpio, cero necesidad de OCR.
+async function va_readOxpsText(buf){
+  try{
+    const zip=await JSZip.loadAsync(buf);
+    const nombresPaginas=Object.keys(zip.files)
+      .filter(n=>/\/Pages\/\d+\.fpage$/i.test(n))
+      .sort((a,b)=>{
+        const na=parseInt(a.match(/(\d+)\.fpage$/)[1],10);
+        const nb=parseInt(b.match(/(\d+)\.fpage$/)[1],10);
+        return na-nb;
+      });
+    let texto='';
+    for(const nombre of nombresPaginas){
+      const xml=await zip.file(nombre).async('string');
+      const fragmentos=[...xml.matchAll(/UnicodeString="([^"]*)"/g)].map(m=>m[1]);
+      texto+=fragmentos.join(' ')+'\n';
+    }
+    return texto;
+  }catch(e){console.warn('OXPS read error:',e);return '';}
+}
 
 // NOTA: había acá una segunda definición de va_getPdfTextOCR(buf) (sin
 // maxPagesOCR) — en JS, dos `function` declaradas con el mismo nombre en el
@@ -12219,7 +12249,75 @@ async function va_validarLicenciasMedicas(){
     va_docResults['licencias']={nombre:'Licencias Médicas',cargado:false,estado:'—'};return;
   }
   const lhRutSet=new Set(va_lhFiltered.map(x=>x.rutNorm));
-  for(const buf of dd.buffers){
+  // Extraído a helper para poder reusarlo tanto en páginas de PDF como en el
+  // texto completo de un .oxps (que no tiene "páginas" en el mismo sentido —
+  // el listado tabular real llega ahí completo de una vez). Devuelve cuántas
+  // filas encontró (0 = esta página/texto no es del listado tabular).
+  function va_procesarFilasLicenciaTabla(txt){
+    const filasTabla=[...txt.matchAll(VA_LIC_TABLA_ROW_RE)];
+    for(const fila of filasTabla){
+      const rutFila=va_normRut(fila[1]);
+      if(!lhRutSet.has(rutFila))continue;
+      va_licMedRuts.add(rutFila);
+      if(va_periodoMes&&va_periodoAnio){
+        const fechaInicio=va_parseFechaDDMMYYYY(fila[3]);
+        const dias=parseInt(fila[5],10);
+        if(fechaInicio&&dias){
+          const dEnPeriodo=va_diasLicenciaEnPeriodo(fechaInicio,dias,va_periodoMes,va_periodoAnio);
+          if(dEnPeriodo!=null)va_licMedDiasPorRut.set(rutFila,(va_licMedDiasPorRut.get(rutFila)||0)+dEnPeriodo);
+        }
+      }
+    }
+    return filasTabla.length;
+  }
+  // El listado tabular de un .oxps sale SIN espacios entre columnas (a
+  // diferencia de un PDF, donde el texto extraído por página respeta la
+  // posición de cada celda) -- confirmado con el archivo real: una fila
+  // completa llega como "27.826.792-5Alballay Villagran Pedro19-06-
+  // 202602-07-202614" (RUT+Nombre+FechaInicio+FechaFin+Días, todo pegado,
+  // solo el nombre tiene espacios internos entre sus propias palabras). Y el
+  // RUT casi siempre viene con el N° de fila pegado adelante sin separador
+  // (fila 2: "2"+"7.826.792-5" → "27.826.792-5"), el mismo problema ya
+  // documentado para el Libro de Remuneraciones -- acá se resuelve probando
+  // el RUT capturado TAL CUAL y, si no pasa el dígito verificador chileno,
+  // recortándole el primer dígito y probando de nuevo (validado con el
+  // archivo real: 68/68 filas resueltas sin ambigüedad, el DV decide
+  // siempre cuál de las dos lecturas es la real).
+  const VA_LIC_TABLA_OXPS_RE=/(\d{1,2}\.\d{3}\.\d{3}-[\dkK])([A-Za-zÁÉÍÓÚÑñáéíóúñ][A-Za-zÁÉÍÓÚÑñáéíóúñ\s]*?)(\d{1,2}-\d{1,2}-\d{4})(\d{1,2}-\d{1,2}-\d{4})(\d{1,3})/g;
+  function va_procesarFilasOxpsLicencia(txt){
+    let n=0;
+    for(const fila of txt.matchAll(VA_LIC_TABLA_OXPS_RE)){
+      const candidatos=new Set();
+      va_addRut(candidatos,fila[1]);
+      if(!candidatos.size)va_addRut(candidatos,fila[1].replace(/^\d/,''));
+      if(!candidatos.size)continue;
+      const rutFila=[...candidatos][0];
+      if(!lhRutSet.has(rutFila))continue;
+      va_licMedRuts.add(rutFila);
+      n++;
+      if(va_periodoMes&&va_periodoAnio){
+        const fechaInicio=va_parseFechaDDMMYYYY(fila[3]);
+        const dias=parseInt(fila[5],10);
+        if(fechaInicio&&dias){
+          const dEnPeriodo=va_diasLicenciaEnPeriodo(fechaInicio,dias,va_periodoMes,va_periodoAnio);
+          if(dEnPeriodo!=null)va_licMedDiasPorRut.set(rutFila,(va_licMedDiasPorRut.get(rutFila)||0)+dEnPeriodo);
+        }
+      }
+    }
+    return n;
+  }
+  for(let bi=0;bi<dd.buffers.length;bi++){
+    const buf=dd.buffers[bi];
+    const nombreArchivo=(dd.files&&dd.files[bi]&&dd.files[bi].name)||'';
+    // .oxps (XPS Document): encontrado en un caso real -- el usuario exportó
+    // el listado TABULAR completo (RUT+nombre+fechas+días) en este formato en
+    // vez de PDF, y antes era invisible para el validador (input solo
+    // aceptaba .pdf). Es texto limpio, sin páginas de OCR que procesar.
+    if(/\.oxps$/i.test(nombreArchivo)||/\.xps$/i.test(nombreArchivo)){
+      const txtOxps=await va_readOxpsText(buf);
+      va_procesarFilasOxpsLicencia(txtOxps);
+      continue;
+    }
     if(!ren_ocrWorker) await cargarOCR();
     const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
     for(let p=1;p<=pdf.numPages;p++){
@@ -12236,21 +12334,8 @@ async function va_validarLicenciasMedicas(){
         if(ocrTxt&&ocrTxt.replace(/\s/g,'').length>txtLen){txt=ocrTxt;txtLen=txt.replace(/\s/g,'').length;}
       }
       // 1) ¿Es una página del listado tabular? (varias filas RUT+fechas+días)
-      const filasTabla=[...txt.matchAll(VA_LIC_TABLA_ROW_RE)];
-      for(const fila of filasTabla){
-        const rutFila=va_normRut(fila[1]);
-        if(!lhRutSet.has(rutFila))continue;
-        va_licMedRuts.add(rutFila);
-        if(va_periodoMes&&va_periodoAnio){
-          const fechaInicio=va_parseFechaDDMMYYYY(fila[3]);
-          const dias=parseInt(fila[5],10);
-          if(fechaInicio&&dias){
-            const dEnPeriodo=va_diasLicenciaEnPeriodo(fechaInicio,dias,va_periodoMes,va_periodoAnio);
-            if(dEnPeriodo!=null)va_licMedDiasPorRut.set(rutFila,(va_licMedDiasPorRut.get(rutFila)||0)+dEnPeriodo);
-          }
-        }
-      }
-      if(filasTabla.length)continue; // ya se sacó todo lo útil de esta página
+      const filasTabla=va_procesarFilasLicenciaTabla(txt);
+      if(filasTabla)continue; // ya se sacó todo lo útil de esta página
       // 2) Formulario individual (Minsal u otro) — comportamiento original
       const encontrados=va_findAllRuts(txt);
       encontrados.forEach(r=>va_licMedRuts.add(r));
