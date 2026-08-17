@@ -610,6 +610,34 @@ documentados porque el patrón se va a repetir:
   revisa cruce manualmente contra el cuaderno físico, no prometer un cruce
   automático que no se puede validar con lo que hay hoy.
 
+## Escalera de confianza: medir cuánta IA se gasta de verdad, no intuirlo
+
+Inspirado en el diseño de `MOTOR VISUAL MULTICAPA` (proyecto Python separado
+del usuario, `perception/confidence_router.py`/`escalation.py`): cada vez que
+un módulo con niveles "gratis primero, IA al final" (Exención de Cotizar,
+Libro de Asistencia Lo Barnechea y Antofagasta) resuelve una página, llama a
+`va_registrarResolucion(modulo, via)` con `via` ∈ `'gratis'|'ia'|'sinResolver'`
+(cualquier string que no sea `'gratis'`/`'ia'` cuenta como `sinResolver`) —
+solo incrementa contadores en `va_iaMetricas[modulo]`, no cambia ninguna
+decisión existente. `va_renderIAAuditSection(nombreModulo)` (que ya se
+renderiza al final del detalle de cada módulo) ahora muestra un resumen
+"📊 De N resoluciones: X sin gastar IA (Y%)" **incluso si el módulo se
+resolvió 100% gratis y nunca dejó una entrada en `va_iaAuditLog`** — antes
+esos casos (los más interesantes: "no hizo falta IA para nada") eran
+invisibles porque la función devolvía `''` si `va_iaAuditLog` no tenía
+entradas para ese módulo.
+
+Al agregar el patrón a un módulo nuevo: llamar `va_registrarResolucion` en
+CADA punto de resolución existente (no crear ninguno nuevo), justo al lado
+de donde ya se decide el resultado — es una línea agregada, nunca un cambio
+de la condición que decide. Verificado en consola del navegador (no hay forma
+de correr el flujo completo con archivos reales en este sandbox, ver sección
+de abajo): los contadores suman bien y `va_renderIAAuditSection` combina
+métricas + detalle sin romper el render existente cuando ambos coexisten.
+
+Reset: `va_iaMetricas={}` se limpia junto con `va_iaAuditLog=[]` al arrancar
+`va_ejecutar()` — si se agrega un reset nuevo en otro lugar, no olvidar este.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),

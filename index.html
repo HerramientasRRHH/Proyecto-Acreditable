@@ -10644,6 +10644,18 @@ let va_iaDiag=null; // {configurada,paginasOk,paginasError} — diagnóstico de 
 // reproducir el llamado a mano con scripts cada vez — ver skill
 // acreditable-review para el proceso que esto reemplaza/acelera.
 let va_iaAuditLog=[]; // {modulo,pagina,tipo,nombreLeido,rutLeido,resultado,atribuidoA,motivo}
+// Métricas de "escalera de confianza": cuenta, por módulo, cuántas resoluciones
+// se lograron gratis (regex/OCR/nombre local) vs. con IA vs. sin resolver —
+// responde con números reales cuánta IA hace falta de verdad, en vez de intuición.
+// Patrón inspirado en MOTOR VISUAL MULTICAPA (perception/confidence_router.py +
+// escalation.py) — ver sección "Escalera de confianza" en el Skill acreditable-review.
+let va_iaMetricas={}; // {[modulo]:{gratis,ia,sinResolver}}
+function va_registrarResolucion(modulo,via){
+  if(!va_iaMetricas[modulo])va_iaMetricas[modulo]={gratis:0,ia:0,sinResolver:0};
+  if(via==='gratis')va_iaMetricas[modulo].gratis++;
+  else if(via==='ia')va_iaMetricas[modulo].ia++;
+  else va_iaMetricas[modulo].sinResolver++;
+}
 let va_periodoMes=null,va_periodoAnio=null; // Fix 1: periodo extraído del LH
 
 // ── HELPERS ──
@@ -11897,6 +11909,9 @@ async function va_validarLiquidaciones(){
               if(libroFaltasIA!=null) wLibro.libroFaltasIA=(wLibro.libroFaltasIA||0)+libroFaltasIA;
               if(libroPermisosIA!=null) wLibro.libroPermisosIA=(wLibro.libroPermisosIA||0)+libroPermisosIA;
               if(libroLicDiasIA!=null) wLibro.libroLicDiasIA=(wLibro.libroLicDiasIA||0)+libroLicDiasIA;
+              va_registrarResolucion('Libro de Asistencia','ia');
+            } else {
+              va_registrarResolucion('Libro de Asistencia','sinResolver');
             }
           } else {
             // Sin nombre leído (heurística vieja sin IA disponible): único
@@ -11904,6 +11919,7 @@ async function va_validarLiquidaciones(){
             w.tieneLibro = true;
             if(!w.libroPaginas)w.libroPaginas=[];
             if(!w.libroPaginas.includes(p))w.libroPaginas.push(p);
+            va_registrarResolucion('Libro de Asistencia','gratis');
           }
         }
         if(licMedIA){
@@ -12275,10 +12291,10 @@ async function va_validarExenciones(){
       const encontrados=va_findAllRuts(txt);
       let matchEnPagina=false;
       encontrados.forEach(r=>{va_addRut(ruts,r);if(jubRutSet.has(r))matchEnPagina=true;});
-      if(matchEnPagina)continue;
+      if(matchEnPagina){va_registrarResolucion('Exención Cotizar','gratis');continue;}
       // Nivel 1.5: checksum contra la nómina de jubilados, sin IA
       const rutChecksum=va_extraerRutConChecksum(txt,jubRutSet);
-      if(rutChecksum){va_addRut(ruts,rutChecksum);continue;}
+      if(rutChecksum){va_addRut(ruts,rutChecksum);va_registrarResolucion('Exención Cotizar','gratis');continue;}
       // Nivel 1.75: el RUT de estos formularios AFP a veces viene escrito a
       // mano en casillas separadas ("RUT| |7[1[9") y el OCR lo destroza —
       // pero el NOMBRE suele estar impreso/tipeado cerca y SÍ se lee bien.
@@ -12301,6 +12317,7 @@ async function va_validarExenciones(){
         va_iaAuditLog.push({modulo:'Exención Cotizar',pagina:p,tipo:'EXENCION_AFP',
           nombreLeido:matchPorNombre.nombre,resultado:'match',atribuidoA:matchPorNombre.nombre,
           motivo:'RUT no reconocible por OCR (manuscrito) — atribuido por nombre en el texto OCR, sin gastar IA'});
+        va_registrarResolucion('Exención Cotizar','gratis');
         continue;
       }
       // Nivel 2: IA visual, solo si hay key configurada — la página quedó sin
@@ -12314,11 +12331,13 @@ async function va_validarExenciones(){
             nombreLeido:leido.nombre,rutLeido:leido.rut||null,resultado:match?'match':'sin_match',
             atribuidoA:match?match.nombre:null,
             motivo:match?null:'nombre leído no coincide con ningún jubilado de la nómina'});
-          if(match)va_addRut(ruts,match.rutNorm);
+          if(match){va_addRut(ruts,match.rutNorm);va_registrarResolucion('Exención Cotizar','ia');}
+          else va_registrarResolucion('Exención Cotizar','sinResolver');
         }else if(leido){
           va_iaAuditLog.push({modulo:'Exención Cotizar',pagina:p,tipo:'EXENCION_AFP',
             nombreLeido:null,resultado:'sin_lectura',atribuidoA:null,
             motivo:'la IA no identificó ningún nombre en la página'});
+          va_registrarResolucion('Exención Cotizar','sinResolver');
         }
       }
     }
@@ -13157,7 +13176,8 @@ async function va_validarLibroAsist(){
         }
       }catch(pageErr){console.warn('Libro Antofagasta pág '+totalPags,pageErr);}
       if(matchWorker){
-        if(fuente==='OCR')viaOCR++;else viaIA++;
+        if(fuente==='OCR'){viaOCR++;va_registrarResolucion('Libro de Asistencia (Antofagasta)','gratis');}
+        else{viaIA++;va_registrarResolucion('Libro de Asistencia (Antofagasta)','ia');}
         const rutM=matchWorker.rutNorm;
         if(!va_liqMap.has(rutM))va_liqMap.set(rutM,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
           tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false,tieneCartaNoFirmaLiq:false});
@@ -13167,6 +13187,7 @@ async function va_validarLibroAsist(){
           nombreLeido,resultado:'match',atribuidoA:matchWorker.nombre,motivo:null});
       }else{
         sinIdentificar++;
+        va_registrarResolucion('Libro de Asistencia (Antofagasta)','sinResolver');
         va_iaAuditLog.push({modulo:'Libro de Asistencia (Antofagasta)',pagina:totalPags,tipo:'LIBRO_ASISTENCIA',
           nombreLeido,resultado:nombreLeido?'sin_match':'sin_lectura',atribuidoA:null,
           motivo:nombreLeido?'nombre leído no coincide con nadie de la nómina':'ni OCR ni IA lograron leer un nombre en la página'});
@@ -13783,7 +13804,7 @@ async function va_ejecutar(){
   if(!va_lhFiltered.length){toast('Selecciona base y sector');return;}
   document.getElementById('va-prog').style.display='block';
   document.getElementById('va-card-result').style.display='none';
-  va_resultados=[];va_docResults={};va_iaAuditLog=[];
+  va_resultados=[];va_docResults={};va_iaAuditLog=[];va_iaMetricas={};
   // Helper para progreso con página actual
   const setPg=(p,msg,extra='')=>{
     va_setProg(p,msg);
@@ -14278,12 +14299,25 @@ function va_renderExencion(){
 function va_renderIAAuditSection(nombreModulo){
   const nombres=Array.isArray(nombreModulo)?nombreModulo:[nombreModulo];
   const entradas=va_iaAuditLog.filter(e=>nombres.includes(e.modulo));
-  if(!entradas.length) return '';
+  // Métricas de escalera de confianza (gratis/IA/sin resolver) — independientes
+  // de si hubo o no lecturas con IA registradas en va_iaAuditLog, porque un
+  // módulo puede resolverse 100% gratis (regex/checksum) sin nunca llegar a
+  // gastar IA, y ese caso es justamente el más interesante de mostrar.
+  const metricas=nombres.reduce((acc,n)=>{
+    const m=va_iaMetricas[n];if(!m)return acc;
+    acc.gratis+=m.gratis;acc.ia+=m.ia;acc.sinResolver+=m.sinResolver;return acc;
+  },{gratis:0,ia:0,sinResolver:0});
+  const totalMetricas=metricas.gratis+metricas.ia+metricas.sinResolver;
+  const metricasHtml=totalMetricas?`<div style="background:#eef4fb;border-radius:7px;padding:8px 12px;font-size:.74rem;margin-bottom:10px">
+    📊 De ${totalMetricas} resolución(es): <strong>${metricas.gratis} sin gastar IA</strong> (${Math.round(metricas.gratis/totalMetricas*100)}%)
+    ${metricas.ia?`, ${metricas.ia} con IA`:''}${metricas.sinResolver?`, ${metricas.sinResolver} sin resolver`:''}
+  </div>`:'';
+  if(!entradas.length) return metricasHtml;
   const matches=entradas.filter(x=>x.resultado==='match'||x.resultado==='firma_trabajador'||x.resultado==='firma_empleador').length;
   const sinMatch=entradas.filter(x=>x.resultado==='sin_match').length;
   const sinLectura=entradas.filter(x=>x.resultado==='sin_lectura').length;
   const iconos={match:'✅',firma_trabajador:'✅ (trabajador)',firma_empleador:'✅ (empleador)',sin_match:'⚠',sin_lectura:'⚠'};
-  let h=`<div class="ch-section-title" style="margin-top:18px">🔍 Detalle de lectura con IA — ${entradas.length} página(s)</div>`;
+  let h=metricasHtml+`<div class="ch-section-title" style="margin-top:18px">🔍 Detalle de lectura con IA — ${entradas.length} página(s)</div>`;
   h+=`<div style="background:#eaf6ef;border-radius:7px;padding:8px 12px;font-size:.74rem;margin-bottom:10px">ℹ "Sin match" = la IA leyó un nombre pero no coincide con nadie de la nómina — revisar la página real antes de asumir que el documento falta.</div>`;
   h+=`<div style="display:flex;gap:14px;margin-bottom:10px;flex-wrap:wrap;font-size:.74rem">
     <span style="color:#16613a">✅ ${matches} atribuida(s)</span>
