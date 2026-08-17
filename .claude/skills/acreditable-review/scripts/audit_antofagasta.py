@@ -176,6 +176,82 @@ def cargar_lh(path):
         })
     return rows
 
+# ── va_normalizarNombre / va_tokensNombre / va_coberturaTokens / va_matchNombreNominaConMotivo ──
+import unicodedata
+
+VA_STOP_TOKENS = {'SR','SRA','DON','DONA','SENOR','SENORA','DE','LA','EL',
+                   'MES','DIA','DIAS','ANO','ANIO','TOTAL','HORAS','NOTA'}
+
+def normalizar_nombre(s):
+    s = (s or '').upper()
+    s = unicodedata.normalize('NFD', s)
+    s = ''.join(c for c in s if unicodedata.category(c) != 'Mn')
+    s = re.sub(r'[^A-Z\s]', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+def tokens_nombre(s):
+    norm = normalizar_nombre(s)
+    out = []
+    for t in norm.split(' '):
+        if t and len(t) >= 2 and t not in VA_STOP_TOKENS and t not in out:
+            out.append(t)
+    return out
+
+def levenshtein(a, b):
+    m, n = len(a), len(b)
+    dp = [[0]*(n+1) for _ in range(m+1)]
+    for i in range(m+1): dp[i][0] = i
+    for j in range(n+1): dp[0][j] = j
+    for i in range(1, m+1):
+        for j in range(1, n+1):
+            dp[i][j] = dp[i-1][j-1] if a[i-1]==b[j-1] else 1+min(dp[i-1][j-1],dp[i-1][j],dp[i][j-1])
+    return dp[m][n]
+
+def token_match(t1, t2):
+    if t1 == t2: return True
+    d = levenshtein(t1, t2)
+    tol = 1 if min(len(t1), len(t2)) <= 5 else 2
+    return d <= tol
+
+def cobertura_tokens(a_tokens, b_tokens):
+    if not a_tokens: return 0
+    matched = 0
+    usados = set()
+    for lt in a_tokens:
+        for i, bt in enumerate(b_tokens):
+            if i in usados: continue
+            if token_match(lt, bt):
+                matched += 1
+                usados.add(i)
+                break
+    return matched / len(a_tokens)
+
+def match_nombre_nomina_con_motivo(nombre_leido, lista_lh):
+    lt = tokens_nombre(nombre_leido)
+    if not lt or not lista_lh:
+        return None, 'sin_tokens', []
+    scored = []
+    for t in lista_lh:
+        ht = tokens_nombre(t['nombre'])
+        if not ht: continue
+        scored.append((cobertura_tokens(lt, ht), t))
+    if not scored:
+        return None, 'sin_candidatos', []
+    scored.sort(key=lambda x: -x[0])
+    mejor_cov, mejor_t = scored[0]
+    segundo_cov = scored[1][0] if len(scored) > 1 else 0
+    if len(lt) >= 2:
+        if mejor_cov < 1: return None, 'sin_cobertura', []
+    else:
+        if mejor_cov < 1 or len(lt[0]) < 4: return None, 'sin_cobertura', []
+    if mejor_cov - segundo_cov < 0.34:
+        empatados = [t for cov, t in scored if cov >= mejor_cov - 1e-9]
+        if len(empatados) > 1:
+            return None, 'ambiguo', [e['nombre'] for e in empatados]
+    return mejor_t, 'ok', []
+
+
 if __name__ == '__main__':
     lh_path = sys.argv[1] if len(sys.argv) > 1 else None
     if lh_path:

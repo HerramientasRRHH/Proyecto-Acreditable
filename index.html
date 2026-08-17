@@ -11112,6 +11112,28 @@ function va_matchNombreNominaConMotivo(nombreLeido,listaLH){
   }
   return{match:mejor.t,motivo:'ok',candidatos:[]};
 }
+// va_matchNombreNomina exige cobertura EXACTA de 1.0 (a propósito, para no
+// atribuir mal) — pero el regex TRABAJADOR_RE del Libro de Asistencia
+// Antofagasta a veces captura una palabra de basura de más al final del
+// nombre (ej. OCR real: "MBARGUEN LILIA mes JoMo" para la trabajadora real
+// "Ibarguen Hurtado Lilia" — "JoMo" es ruido de la foto, no parte del
+// nombre). Esa única palabra de más basta para tirar la cobertura por debajo
+// de 1.0 y rechazar una lectura que en realidad era correcta. Acá se
+// reintenta recortando palabras desde el FINAL del texto leído (nunca desde
+// el principio, que es donde está el apellido) hasta encontrar match o
+// quedarse sin margen — validado con el caso real: recortando 1 palabra
+// pasa de "sin_cobertura" a "ok" sin ambigüedad.
+function va_matchNombreConRecorte(candidato,listaLH,maxRecortes){
+  maxRecortes=maxRecortes==null?2:maxRecortes;
+  const palabras=(candidato||'').trim().split(/\s+/);
+  for(let i=0;i<=maxRecortes;i++){
+    const intento=i===0?candidato:palabras.slice(0,palabras.length-i).join(' ');
+    if(intento.split(/\s+/).length<2)break;
+    const match=va_matchNombreNomina(intento,listaLH);
+    if(match)return match;
+  }
+  return null;
+}
 
 // ── Llamada genérica a la IA visual (MiniMax, endpoint Anthropic-compatible) ──
 // Reutiliza la configuración ya cargada en el panel "Configuración del motor IA"
@@ -13341,8 +13363,31 @@ async function va_validarLibroAsist(){
   // paralelismo real: si el pool funciona, deberían verse varios
   // "archivo N iniciado" con "en curso" > 1 antes de que termine el primero.
   let archivosLibroEnCurso=0,archivosLibroIniciados=0;
-  async function procesarArchivoLibro(buf,worker){
+  // Cada archivo de Antofagasta es "Libro de asistencia letra X.pdf" — los
+  // trabajadores adentro están ordenados por APELLIDO, todos con la misma
+  // letra inicial (pedido del usuario: aprovechar esto). Restringir los
+  // candidatos del matching a solo esa letra reduce drásticamente el pool
+  // (330 → ~15-20) y con eso la ambigüedad: de una auditoría real, 31 de 94
+  // "sin match" eran justo casos de AMBIGÜEDAD (2+ personas de letras
+  // DISTINTAS empatando en la nómina completa, ej. "Bonoso" empataba entre
+  // dos "Donoso" — ninguno de letra B, así que restringir a B los habría
+  // sacado del todo del pool). Si no se puede extraer la letra del nombre
+  // del archivo, o si el filtro deja 0 candidatos (typo raro), se cae de
+  // vuelta a la nómina completa — nunca se bloquea el matching por esto.
+  function va_candidatosLibroPorLetra(nombreArchivo){
+    const m=/([A-Za-zÁÉÍÓÚÑáéíóúñ])\.pdf\s*$/i.exec(nombreArchivo||'');
+    if(!m)return va_lhFiltered;
+    const letra=va_normalizarNombre(m[1]);
+    if(!letra)return va_lhFiltered;
+    const filtrados=va_lhFiltered.filter(function(x){
+      const primerTok=va_tokensNombre(x.nombre)[0];
+      return primerTok&&primerTok.charAt(0)===letra;
+    });
+    return filtrados.length?filtrados:va_lhFiltered;
+  }
+  async function procesarArchivoLibro(buf,worker,idxArchivo){
     const ren_ocrWorker=worker; // shadow local: todo el bloque de abajo usa el worker que le tocó a ESTE archivo
+    const candidatosLibro=va_candidatosLibroPorLetra(dd.files&&dd.files[idxArchivo]&&dd.files[idxArchivo].name);
     archivosLibroIniciados++;archivosLibroEnCurso++;
     const miArchivoNum=archivosLibroIniciados;
     console.log(`[Libro Antofagasta] archivo ${miArchivoNum} iniciado — ${archivosLibroEnCurso} en curso simultáneamente`);
@@ -13374,7 +13419,7 @@ async function va_validarLibroAsist(){
           const m=TRABAJADOR_RE.exec(text);
           if(m){
             const candidato=m[1].trim();
-            const match=va_matchNombreNomina(candidato,va_lhFiltered);
+            const match=va_matchNombreConRecorte(candidato,candidatosLibro);
             if(match){nombreLeido=candidato;fuente='OCR';matchWorker=match;}
           }
         }catch(ocrErr){console.warn('OCR Libro Antofagasta p'+totalPags,ocrErr);}
@@ -13392,7 +13437,7 @@ async function va_validarLibroAsist(){
               const parsed=JSON.parse(mIA[0]);
               if(parsed.nombre_trabajador){
                 nombreLeido=parsed.nombre_trabajador;
-                const match=va_matchNombreNomina(parsed.nombre_trabajador,va_lhFiltered);
+                const match=va_matchNombreConRecorte(parsed.nombre_trabajador,candidatosLibro);
                 if(match){fuente='IA';matchWorker=match;}
               }
             }
