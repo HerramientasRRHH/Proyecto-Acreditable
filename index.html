@@ -11047,27 +11047,39 @@ function va_coberturaTokens(aTokens,bTokens){
 // (dos candidatos empatados en cobertura) — preferimos no atribuir antes que
 // atribuir mal.
 function va_matchNombreNomina(nombreLeido,listaLH){
+  return va_matchNombreNominaConMotivo(nombreLeido,listaLH).match;
+}
+// Igual que va_matchNombreNomina, pero además dice POR QUÉ no matcheó —
+// sobre todo distingue "no coincide con nadie" de "empate ambiguo entre 2+
+// personas reales de la nómina" (caso real: "Juan Bustos" empataba entre
+// "Bustos Proboste Juan Esteban" y "Naipil Burgos Juan Alex" porque BUSTOS/
+// BURGOS quedan a distancia 2 en el matcheo difuso de tokens). Antes esto se
+// perdía — el audit log solo decía "no coincide con nadie", que hace pensar
+// que la persona ni siquiera está en la nómina cuando en realidad SÍ está,
+// solo que hay más de un candidato posible y no se puede adivinar cuál sin
+// que un humano lo confirme.
+function va_matchNombreNominaConMotivo(nombreLeido,listaLH){
   const lt=va_tokensNombre(nombreLeido);
-  if(!lt.length||!listaLH||!listaLH.length)return null;
+  if(!lt.length||!listaLH||!listaLH.length)return{match:null,motivo:'sin_tokens',candidatos:[]};
   const scored=[];
   for(const t of listaLH){
     const ht=va_tokensNombre(t.nombre);
     if(!ht.length)continue;
     scored.push({cov:va_coberturaTokens(lt,ht),t});
   }
-  if(!scored.length)return null;
+  if(!scored.length)return{match:null,motivo:'sin_candidatos',candidatos:[]};
   scored.sort((a,b)=>b.cov-a.cov);
   const mejor=scored[0],segundoCov=scored.length>1?scored[1].cov:0;
   if(lt.length>=2){
-    if(mejor.cov<1)return null;
+    if(mejor.cov<1)return{match:null,motivo:'sin_cobertura',candidatos:[]};
   }else{
-    if(mejor.cov<1||lt[0].length<4)return null;
+    if(mejor.cov<1||lt[0].length<4)return{match:null,motivo:'sin_cobertura',candidatos:[]};
   }
   if(mejor.cov-segundoCov<0.34){
     const empatados=scored.filter(s=>s.cov>=mejor.cov-1e-9);
-    if(empatados.length>1)return null;
+    if(empatados.length>1)return{match:null,motivo:'ambiguo',candidatos:empatados.map(e=>e.t.nombre)};
   }
-  return mejor.t;
+  return{match:mejor.t,motivo:'ok',candidatos:[]};
 }
 
 // ── Llamada genérica a la IA visual (MiniMax, endpoint Anthropic-compatible) ──
@@ -11861,17 +11873,23 @@ async function va_validarLiquidaciones(){
             // valida el nombre). Si el nombre no matchea con nadie de la
             // nómina, no se le atribuye a nadie: mejor no encontrar nada que
             // atribuírselo al trabajador equivocado.
-            const matchLibro=va_matchNombreNomina(libroNombreIA,va_lhFiltered);
+            const{match:matchLibro,motivo:motivoLibro,candidatos:candidatosLibro}=va_matchNombreNominaConMotivo(libroNombreIA,va_lhFiltered);
             va_iaAuditLog.push({modulo:'Libro de Asistencia',pagina:p,tipo:'LIBRO_ASISTENCIA',
               nombreLeido:libroNombreIA,resultado:matchLibro?'match':'sin_match',
               atribuidoA:matchLibro?matchLibro.nombre:null,
-              motivo:matchLibro?null:'nombre leído no coincide con ningún trabajador de la nómina'});
+              motivo:matchLibro?null:(motivoLibro==='ambiguo'
+                ?`nombre ambiguo — coincide con ${candidatosLibro.length} de la nómina: ${candidatosLibro.join(' / ')} (requiere confirmar a mano)`
+                :'nombre leído no coincide con ningún trabajador de la nómina')});
             if(matchLibro){
               const rutLibro=matchLibro.rutNorm;
               if(!va_liqMap.has(rutLibro)) va_liqMap.set(rutLibro,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
                 tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false,tieneCartaNoFirmaLiq:false});
               const wLibro=va_liqMap.get(rutLibro);
               wLibro.tieneLibro=true;
+              // Página(s) del PDF donde se encontró el Libro de este trabajador
+              // — pedido explícito: mostrar dónde lo encontró, no solo que sí/no.
+              if(!wLibro.libroPaginas)wLibro.libroPaginas=[];
+              if(!wLibro.libroPaginas.includes(p))wLibro.libroPaginas.push(p);
               if(libroNotasIA) wLibro.libroNotasIA=((wLibro.libroNotasIA?wLibro.libroNotasIA+' | ':'')+libroNotasIA);
               if(!wLibro.libroNombreIA) wLibro.libroNombreIA=libroNombreIA;
               // Acumular por si el Libro de este trabajador viene en más de
@@ -11884,6 +11902,8 @@ async function va_validarLiquidaciones(){
             // Sin nombre leído (heurística vieja sin IA disponible): único
             // caso donde seguimos confiando en el rastreo de RUT de la página.
             w.tieneLibro = true;
+            if(!w.libroPaginas)w.libroPaginas=[];
+            if(!w.libroPaginas.includes(p))w.libroPaginas.push(p);
           }
         }
         if(licMedIA){
@@ -14111,7 +14131,7 @@ function va_renderLibroDetalle(){
     const w=va_liqMap.get(x.rutNorm);
     const tiene=!!(w&&w.tieneLibro);
     if(!tiene){
-      return{rut:x.rut,nombre:x.nombre,estado:'faltante',icono:'❌',
+      return{rut:x.rut,nombre:x.nombre,estado:'faltante',icono:'❌',pagina:'—',
         lh:{faltas:w?w.inasistencias:0,permisos:w?w.permisos:0,licencias:w?w.licencias:0},
         libro:{faltas:null,permisos:null,licencias:null},notas:'',obs:'Libro no encontrado / no atribuido con IA'};
     }
@@ -14129,6 +14149,7 @@ function va_renderLibroDetalle(){
     else if(mismatches.length){estado='discrepancia';icono='⚠';obs=mismatches.join(' · ');}
     else{estado='ok';icono='✅';obs='Coincide con LH';}
     return{rut:x.rut,nombre:x.nombre,estado,icono,
+      pagina:(w.libroPaginas&&w.libroPaginas.length)?w.libroPaginas.join(', '):'—',
       lh:{faltas:lhFaltas,permisos:lhPermisos,licencias:lhLicencias},
       libro:{faltas:libFaltas,permisos:libPermisos,licencias:libLicencias},
       notas:w.libroNotasIA||'',obs};
@@ -14144,10 +14165,11 @@ function va_renderLibroDetalle(){
     <div class="ch-kpi${sinLect?' warn':''}"><div class="v">${sinLect}</div><div class="l">⚠ Sin conteo IA</div></div>
     <div class="ch-kpi${falt?' err':''}"><div class="v">${falt}</div><div class="l">❌ Libro faltante</div></div>
   </div>`;
-  h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Faltas LH/Libro</th><th>Permisos LH/Libro</th><th>Licencia LH/Libro</th><th>Observación</th></tr></thead><tbody>';
+  h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Pág.</th><th>Faltas LH/Libro</th><th>Permisos LH/Libro</th><th>Licencia LH/Libro</th><th>Observación</th></tr></thead><tbody>';
   const fmt=v=>v==null?'—':v;
   [...filas].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
     h+=`<tr><td>${f.icono}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td>`+
+      `<td style="text-align:center;font-size:.7rem">${f.pagina}</td>`+
       `<td style="text-align:center">${f.lh.faltas}/${fmt(f.libro.faltas)}</td>`+
       `<td style="text-align:center">${f.lh.permisos}/${fmt(f.libro.permisos)}</td>`+
       `<td style="text-align:center">${f.lh.licencias}/${fmt(f.libro.licencias)}</td>`+
