@@ -13113,11 +13113,39 @@ async function va_validarCartaNoFirma(){
 // alcanza, hay que confirmar que LOS 3 documentos estén Y que cada uno esté
 // firmado por ambas partes.
 const VA_CONTRATO_TIPOS=['CONTRATO','ANEXO_CARGO','ANEXO_HHEE'];
+// Caso real que rompía esto: OCR leyó el título como "ANEXO DE CONTRA O DE
+// TRABAJO" (falta la T de CONTRATO) — el regex exacto no matcheaba, caía al
+// fallback genérico de abajo, que SÍ encontraba "CONTRATO DE TRABAJO" en el
+// cuerpo del propio Anexo (todos comparten el mismo párrafo de apertura
+// "CONTRATO DE CONCESIÓN DE SUMINISTRO...") y clasificaba la página entera
+// como si fuera el inicio de un Contrato nuevo — perdiendo el Anexo real
+// (documentado en la sesión: 6 de 9 trabajadores nuevos daban "falta Anexo
+// HHEE" con datos reales, cuando el documento SÍ estaba, solo mal
+// clasificado). Fix de dos partes, validado contra las 53 páginas reales del
+// archivo agrupado (20 páginas tituladas, 0 discrepancias):
+//  1) Ademas del regex exacto (que ya resolvía la mayoría — algunos Anexos
+//     mencionan "anexo de contrato" limpio más abajo en su propio cuerpo,
+//     aunque el título en sí esté corrupto), se acepta también si el INICIO
+//     de la página (primeros ~80 caracteres, normalizado) está a distancia
+//     de Levenshtein ≤4 de la frase completa "ANEXO DE CONTRATO DE TRABAJO"
+//     — tolera 1-2 caracteres mal leídos sin abrirse a falsos positivos (un
+//     Contrato real, cuyo inicio es solo "CONTRATO DE TRABAJO...", queda a
+//     distancia ~18, muy lejos del umbral).
+//  2) El fallback genérico de "CONTRATO" solo mira los primeros 100
+//     caracteres de la página (el título real, si existe, siempre está ahí)
+//     en vez de la página completa — así una referencia al contrato dentro
+//     del CUERPO de un Anexo (como el caso real de arriba) ya no puede
+//     disparar una clasificación falsa.
 function va_clasificarTituloContrato(txt){
-  if(/ANEXO\s+DE\s+CONTRATO/i.test(txt)){
+  const inicioLimpio=(txt||'').slice(0,80).toUpperCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .replace(/[^A-ZÑ\s]/g,' ').replace(/\s+/g,' ').trim();
+  const fraseAnexo='ANEXO DE CONTRATO DE TRABAJO';
+  const pareceAnexoPorInicio=va_distanciaLevenshtein(inicioLimpio.slice(0,fraseAnexo.length),fraseAnexo)<=4;
+  if(/ANEXO\s+DE\s+CONTRATO/i.test(txt)||pareceAnexoPorInicio){
     return /Pacto\s+Horas\s+Extras|horas\s+extraordinarias/i.test(txt)?'ANEXO_HHEE':'ANEXO_CARGO';
   }
-  if(/CONTRATO\s+DE\s+TRABAJO/i.test(txt))return'CONTRATO';
+  if(/CONTRATO\s+DE\s+TRABAJO/i.test(txt.slice(0,100)))return'CONTRATO';
   return null;
 }
 // A quién pertenece una página TITULADA de Contrato/Anexo — necesario para
