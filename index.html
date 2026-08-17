@@ -12718,7 +12718,15 @@ function va_clasificar(t,liq){
 // ═══════════════════════════════════════════════════════════
 
 // ── OCR-enhanced PDF text extraction (reuses Renombrador OCR worker) ──
-async function va_getPdfTextOCR(buf,maxPagesOCR){
+// intentarRotacion: OPT-IN, default false/undefined — cuando la pasada
+// recta a 0° da poco texto útil, prueba además 90°/180°/270° antes de
+// resignarse. Es 4 OCR completos EXTRA por cada página que falla, sin
+// tope — con un documento grande (ej. Jubilados, 95 páginas de
+// certificados) esto colgó una corrida real varias horas. Por eso queda
+// apagado por defecto; solo lo activan los llamadores que ya confirmaron
+// (con datos reales) que su documento es chico y el costo es acotado —
+// ver skill acreditable-review.
+async function va_getPdfTextOCR(buf,maxPagesOCR,intentarRotacion){
   maxPagesOCR=maxPagesOCR||30;
   var doc=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
   var total=doc.numPages;var allText='';
@@ -12737,14 +12745,7 @@ async function va_getPdfTextOCR(buf,maxPagesOCR){
         var result=await ren_ocrWorker.recognize(blob);
         if(result&&result.data&&result.data.text) txt=result.data.text;
       }catch(e){console.warn('OCR failed page',p,e);}
-      // Si el OCR derecho (0°) igual dio poco texto útil, la página puede
-      // estar escaneada de costado (90°/270°) — confirmado con datos reales
-      // de Antofagasta (Discapacidad.pdf, Libro de Asistencia): el escaneo
-      // viene en horizontal dentro de una hoja vertical, page.rotation sigue
-      // diciendo 0. Probar las 4 orientaciones y quedarse con la mejor, con
-      // costo extra SOLO para páginas que ya fallaron con la pasada rápida
-      // (ver skill acreditable-review).
-      if(txt.replace(/\s/g,'').length<40&&ren_ocrWorker){
+      if(intentarRotacion&&txt.replace(/\s/g,'').length<40&&ren_ocrWorker){
         try{
           var mejorRot=await va_ocrPaginaMejorRotacion(pg,2.5,[0,90,180,270]);
           if(mejorRot&&mejorRot.replace(/\s/g,'').length>txt.replace(/\s/g,'').length) txt=mejorRot;
@@ -13269,19 +13270,16 @@ async function va_validarLibroAsist(){
         const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
         // 1) OCR gratis primero
         try{
-          let {data:{text}}=await ren_ocrWorker.recognize(blob);
-          let m=TRABAJADOR_RE.exec(text);
-          // Si el OCR derecho (0°) no encontró la etiqueta "TRABAJADOR SR.",
-          // la foto puede estar de costado (90°/270°) — confirmado con datos
-          // reales: las fotos del Libro de Antofagasta vienen escaneadas en
-          // horizontal dentro de una hoja vertical. Reintentar con las 4
-          // orientaciones, pasando explícito el worker de ESTE archivo (no el
-          // global) para no romper el aislamiento del pool paralelo.
-          if(!m){
-            const textoRot=await va_ocrPaginaMejorRotacion(page,2.6,[0,90,180,270],ren_ocrWorker);
-            const mRot=TRABAJADOR_RE.exec(textoRot||'');
-            if(mRot){text=textoRot;m=mRot;}
-          }
+          // NOTA: hubo acá un reintento con rotación (0/90/180/270) cuando
+          // TRABAJADOR_RE no matcheaba — se sacó porque ese regex YA falla
+          // en ~80-85% de las páginas (Skill: la mayoría son cuadernos
+          // manuscritos, no por rotación) — reintentar 4 ángulos en esa
+          // proporción de páginas multiplicaba el costo de OCR de TODO el
+          // Libro varias veces, sin el respaldo de ser un documento chico
+          // como Discapacidad. La página ya cae al fallback de IA más abajo,
+          // que sí funciona — no hacía falta el reintento acá.
+          const {data:{text}}=await ren_ocrWorker.recognize(blob);
+          const m=TRABAJADOR_RE.exec(text);
           if(m){
             const candidato=m[1].trim();
             const match=va_matchNombreNomina(candidato,va_lhFiltered);
@@ -13430,7 +13428,11 @@ async function va_validarDiscapacidad(){
   var discRutsRef=new Set(discLHref.map(function(x){return x.rutNorm;}));
   var ruts=new Set();
   for(var b of dd.buffers){
-    var txt=await va_getPdfTextOCR(b,15);
+    // intentarRotacion=true: Discapacidad son documentos chicos (~7 páginas
+    // reales de Antofagasta), costo acotado incluso con el fallback de 4
+    // ángulos — confirmado necesario porque el archivo real viene escaneado
+    // de costado (ver skill acreditable-review).
+    var txt=await va_getPdfTextOCR(b,15,true);
     va_findAllRuts(txt).forEach(function(r){ruts.add(r);});
     // Nivel 1.5: mismo fallback de checksum que Mujeres/Jubilados — ver skill
     // acreditable-review ("candado anti-monto rechaza RUT pegado a número de fila").

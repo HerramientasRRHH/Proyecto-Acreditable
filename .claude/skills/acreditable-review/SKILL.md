@@ -893,6 +893,46 @@ que la primera (sin parámetro `maxPagesOCR`) nunca se ejecutaba pasara lo
 que pasara. Se eliminó para que no haya ambigüedad sobre cuál función
 editar la próxima vez.
 
+## Un fallback "barato por página" puede ser carísimo a escala del documento — medí el peor caso, no solo el caso típico
+
+El fallback de rotación (0/90/180/270°) de la sección anterior se conectó
+en dos lugares sin pensar el PEOR caso, y una corrida real de Antofagasta
+quedó colgada ~3 horas antes de que el usuario avisara:
+
+- **`va_getPdfTextOCR`** es compartida por documentos CHICOS (Discapacidad,
+  7 páginas) y GRANDES (Jubilados, 95 páginas; F30, Libro Remuneraciones).
+  "4 OCR completos extra por página que falla" es aceptable en 7 páginas y
+  catastrófico en 95 — sobre todo porque las ~90 páginas de certificado
+  individual de Jubilados son justo el tipo de página que dispara el
+  umbral (`<40 caracteres útiles`) sin estar necesariamente rotadas (texto
+  dentro de casillas, sellos superpuestos). **Fix**: el fallback pasó a ser
+  OPT-IN (`va_getPdfTextOCR(buf,maxPagesOCR,intentarRotacion)`, default
+  `false`) — solo lo activa el llamador de Discapacidad, el único
+  confirmado chico. Los otros 8 llamadores (Jubilados, F30, Libro Rem.,
+  etc.) quedan con el comportamiento de siempre, sin este costo.
+- **Libro de Asistencia de Antofagasta** dispara su reintento cuando
+  `TRABAJADOR_RE` no matchea — pero ese regex YA falla en **~80-85% de las
+  páginas** por diseño (la mayoría son cuadernos manuscritos, no fotos
+  rotadas — dato ya documentado arriba en este mismo Skill). Agregarle un
+  reintento de 4 ángulos a esa proporción multiplica el costo de OCR de
+  TODO el Libro (cientos de páginas entre todas las letras) varias veces.
+  **Fix**: se sacó por completo — la página ya cae al fallback de IA que
+  YA funciona, no hacía falta la rotación ahí.
+
+**Lección para la próxima vez que se agregue un fallback "más caro pero
+más preciso"**: antes de conectarlo, preguntate (a) ¿con qué frecuencia
+real se va a disparar? (si el gate ya se sabe que falla en la mayoría de
+los casos — como acá, 80-85% — un fallback caro ahí NO es un fallback
+raro, es el camino común) y (b) ¿cuál es el documento más grande real que
+pasa por esta función compartida? Un costo "aceptable por página" hay que
+multiplicarlo por el peor caso de páginas antes de conectarlo sin tope, no
+asumir que el caso típico representa el peor caso. Esto no se detectó
+antes de pushear porque el sandbox no permite medir tiempos reales con
+PDFs — la única señal fue el usuario reportando una corrida colgada en
+producción. Para cambios de este tipo (fallback caro en un loop de
+páginas), preferir bloquear el alcance con un parámetro opt-in explícito
+en vez de "activar para todos y ver qué pasa".
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
