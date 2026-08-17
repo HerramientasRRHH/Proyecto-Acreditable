@@ -367,6 +367,52 @@ central para el tracking del trabajador de la página — en otros documentos
 (Previred, F30-1, etc.) un RUT perdido por esto no rompe nada porque se
 cruza el SET completo contra la nómina, no un RUT individual por página.
 
+## Cuando "no coincide con nadie de la nómina" en realidad es ambigüedad, no ausencia
+
+Caso real (Lo Barnechea): la IA leyó "Juan Bustos" en una foto del Libro y
+el audit log dijo "no coincide con ningún trabajador de la nómina" — pero
+"Bustos Proboste Juan Esteban" SÍ está en la nómina real. La causa: OTRO
+trabajador real ("Naipil Burgos Juan Alex") tiene un apellido ("Burgos") a
+distancia Levenshtein 2 de "Bustos" — dentro de la tolerancia difusa de
+`token_match` para palabras >5 caracteres — así que los dos alcanzan
+cobertura 1.0 contra "Juan Bustos" y `va_matchNombreNomina` rechaza por
+AMBIGÜEDAD (correcto: mejor no adivinar mal a quién pertenece). El bug real
+no era el matching — era que el mensaje de error no distinguía "nadie
+coincide" de "2+ personas reales empatan" — al usuario/reviewer le parecía
+que el sistema no encontraba a la persona, cuando en realidad SÍ la conocía,
+solo que no podía decidir sola entre 2 candidatos reales.
+
+Fix: `va_matchNombreNominaConMotivo()` (nueva, `va_matchNombreNomina` sigue
+igual por compatibilidad) devuelve también POR QUÉ rechazó
+(`sin_tokens`/`sin_cobertura`/`ambiguo`) y, si es ambiguo, los nombres de
+los candidatos empatados — el audit log ahora se lo puede mostrar al humano
+en vez de un genérico "no coincide con nadie". **Antes de asumir que un
+"sin match" es un problema de LECTURA (IA/OCR leyó mal), revisá primero si
+es un problema de DESAMBIGUACIÓN (leyó bien, pero hay 2+ personas reales
+parecidas)** — son bugs completamente distintos con fixes distintos: el
+primero necesita mejor OCR/IA, el segundo necesita mejor mensaje + revisión
+humana (nunca "adivinar" automáticamente entre dos personas reales, el
+costo de atribuir mal una liquidación/libro a la persona equivocada es
+mucho peor que dejarlo sin resolver).
+
+## Documentos con casillas de RUT manuscritas: mirá el nombre antes de gastar IA
+
+Caso real (Lo Barnechea, formularios AFP de Exención de Cotizar): el RUT
+viene escrito a mano en casillas separadas ("RUT| |7[1[9"), que el OCR
+destroza sistemáticamente — pero el NOMBRE está impreso/tipeado cerca
+("Barraza Espinoza / Carmela de la Merced") y el OCR sí lo lee bien. El
+código ya tenía niveles gratis para el RUT (regex + ventana de checksum)
+antes de cortar a IA, pero ninguno miraba el nombre — se agregó un nivel
+extra: probar cada línea (y pares de líneas consecutivas, por si el layout
+separa Apellidos/Nombres) contra la nómina de referencia con
+`va_matchNombreNomina`, ANTES de gastar una llamada a IA. Con el documento
+real: 4 de 6 páginas que antes necesitaban IA se resuelven así, gratis — las
+otras 2 genuinamente no tienen texto legible ni de RUT ni de nombre (esas sí
+necesitan IA). Mismo principio ya usado en el Libro de Asistencia de
+Antofagasta ("si no lee el RUT, mirá el nombre") — aplicable a cualquier
+documento nuevo con esta misma estructura (RUT en casillas + nombre
+impreso cerca).
+
 ## Paralelizar OCR por archivo: el patrón que sí se pudo probar, y el que no
 
 Se implementó paralelismo real (varios workers de Tesseract a la vez, cada
