@@ -933,6 +933,46 @@ producción. Para cambios de este tipo (fallback caro en un loop de
 páginas), preferir bloquear el alcance con un parámetro opt-in explícito
 en vez de "activar para todos y ver qué pasa".
 
+## Se revirtió la paralelización de va_validarLiquidaciones — sospecha de degradación sistémica
+
+Después del fix urgente de arriba (acotar el fallback de rotación), el
+usuario reportó una SEGUNDA corrida real colgada — esta vez ~1 hora en
+"validando licencias médicas", con Libro de Asistencia ni siquiera
+cargado. Como Licencias no pasa por el código que se acababa de acotar,
+esto apuntaba a algo más de fondo: la paralelización de
+`va_validarLiquidaciones` (3 pasadas, pool de hasta 4 workers de
+Tesseract) crea esos workers una sola vez y los deja VIVOS el resto de la
+corrida (`va_ocrPool` es global, nunca se destruye) — compitiendo por CPU
+con el worker único que usan los pasos siguientes (Finiquitos, Licencias),
+aunque esos pasos no usen el pool directamente. Es una sospecha razonada,
+no confirmada con medición real (mismo límite de sandbox de siempre), pero
+con DOS corridas reales colgadas en el mismo día y sin forma de medir acá,
+no correspondía seguir iterando a ciegas con el usuario esperando en
+producción.
+
+**Se revirtió por completo la paralelización de `va_validarLiquidaciones`**
+(commit `ebf68eb`) — volvió a la versión secuencial original de un solo
+worker, byte por byte (extraída de `git show ebf68eb^:index.html`, no
+reescrita a mano, para no introducir una segunda diferencia sutil encima
+del problema que se está revirtiendo). Quedan pendientes/sin tocar:
+- La paralelización por ARCHIVO de Libro/Contratos de Antofagasta
+  (`va_procesarArchivosEnParalelo`, commits `f5513c9`/`b5e809b`) — esa NO
+  se tocó, es un patrón distinto (un worker por archivo completo, no un
+  pool que quede compitiendo con el resto del pipeline de la misma
+  manera) y no hay evidencia de que cause el mismo problema.
+- Los fixes de lectura (Mujeres/Discapacidad/Jubilados, checksum y
+  rotación acotada a 7 páginas) — no tocan rendimiento, se mantienen.
+
+**Lección**: un pool de workers que se crea una vez y queda vivo para
+"la próxima vez que haga falta" (optimización razonable en teoría) puede
+degradar TODO lo que corre después en la misma sesión de navegador, no
+solo el paso que lo creó — sobre todo si esos pasos siguientes ya estaban
+diseñados para un solo worker. Antes de reintentar esta paralelización,
+haría falta o (a) destruir/liberar el pool explícitamente al terminar
+Liquidaciones, o (b) medirlo de verdad en un navegador real con datos
+reales — ninguna de las dos se hizo la primera vez, y las dos corridas
+reales colgadas de este mismo día son la evidencia de por qué hacía falta.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
