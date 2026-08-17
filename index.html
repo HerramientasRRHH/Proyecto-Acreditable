@@ -12259,8 +12259,32 @@ async function va_validarExenciones(){
       // Nivel 1.5: checksum contra la nómina de jubilados, sin IA
       const rutChecksum=va_extraerRutConChecksum(txt,jubRutSet);
       if(rutChecksum){va_addRut(ruts,rutChecksum);continue;}
+      // Nivel 1.75: el RUT de estos formularios AFP a veces viene escrito a
+      // mano en casillas separadas ("RUT| |7[1[9") y el OCR lo destroza —
+      // pero el NOMBRE suele estar impreso/tipeado cerca y SÍ se lee bien.
+      // Mismo principio que el Libro de Asistencia ("si no lee el RUT, mira
+      // el nombre"): probamos cada línea (y pares de líneas consecutivas,
+      // por si Apellidos/Nombres quedan en líneas separadas por el layout)
+      // contra la nómina de jubilados ANTES de gastar una llamada a IA.
+      // Validado con las 6 páginas reales de Lo Barnechea que llegaban acá
+      // sin RUT reconocible: 4/6 se resuelven así, gratis.
+      const lineasPagina=txt.split('\n').map(l=>l.trim()).filter(Boolean);
+      let matchPorNombre=null;
+      for(let li=0;li<lineasPagina.length&&!matchPorNombre;li++){
+        matchPorNombre=va_matchNombreNomina(lineasPagina[li],jubLH);
+        if(!matchPorNombre&&li+1<lineasPagina.length){
+          matchPorNombre=va_matchNombreNomina(lineasPagina[li]+' '+lineasPagina[li+1],jubLH);
+        }
+      }
+      if(matchPorNombre){
+        va_addRut(ruts,matchPorNombre.rutNorm);
+        va_iaAuditLog.push({modulo:'Exención Cotizar',pagina:p,tipo:'EXENCION_AFP',
+          nombreLeido:matchPorNombre.nombre,resultado:'match',atribuidoA:matchPorNombre.nombre,
+          motivo:'RUT no reconocible por OCR (manuscrito) — atribuido por nombre en el texto OCR, sin gastar IA'});
+        continue;
+      }
       // Nivel 2: IA visual, solo si hay key configurada — la página quedó sin
-      // ningún RUT reconocible de la nómina por ninguno de los métodos gratis.
+      // ningún RUT NI nombre reconocible por ninguno de los métodos gratis.
       if(iaKeyOk){
         paginasIA++;
         const leido=await va_iaLeerNombreRut(page,'Este es un formulario chileno de Exención de Cotizar AFP.');
