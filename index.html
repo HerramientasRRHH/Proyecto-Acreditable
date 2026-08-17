@@ -13911,7 +13911,7 @@ function va_renderResultados(){
   // Sub-tabs: one per document type
   const baseTabs=['liq','finiq','licencias','exencion','f30','f301','previred'];
   const basesConLicEnLiqTabs=['Lo Barnechea','Las Condes','Mejillones'];
-  if(basesConLicEnLiqTabs.includes(va_baseKey)){baseTabs.push('libro');}
+  if(basesConLicEnLiqTabs.includes(va_baseKey)){baseTabs.push('libro','contratos');}
   if(va_baseKey==='Antofagasta'){baseTabs.push('imput','jubilados','anexos','cartanofirma','librorem','libroasist','mujeres','discapacidad','contratos');}
   if(va_baseKey==='Vitacura'){baseTabs.push('contratos','nominas','epp','libroasist','subcontrato');}
   const tabs=baseTabs;
@@ -13948,6 +13948,7 @@ function va_subtab(tab){
   else if(tab==='subcontrato') c.innerHTML=va_renderSubcontrato();
   else if(tab==='contratos'&&va_baseKey==='Vitacura') c.innerHTML=va_renderContratosVitacura();
   else if(tab==='contratos'&&va_baseKey==='Antofagasta') c.innerHTML=va_renderContratosAntofagasta();
+  else if(tab==='contratos'&&['Lo Barnechea','Las Condes','Mejillones'].includes(va_baseKey)) c.innerHTML=va_renderContratosLoBarnechea();
   else c.innerHTML=va_renderCruceTab(tab);
 }
 
@@ -14677,6 +14678,50 @@ function va_renderContratosAntofagasta(){
   }
   h+='<details style="margin-top:14px"><summary style="font-size:.76rem;color:#888;cursor:pointer">🔍 Ver lectura página por página con IA (detalle técnico)</summary>'
     +va_renderIAAuditSection('Contrato (Antofagasta)')+'</details>';
+  return h;
+}
+
+// ── Contratos (Lo Barnechea / Las Condes / Mejillones) ──
+// A diferencia de Antofagasta/Vitacura, acá Contrato/CI/Antecedentes van
+// intercalados DENTRO del PDF de Liquidaciones (mismo archivo), y ya se
+// detectan página por página para TODOS los trabajadores (no solo los
+// nuevos del período) — w.tieneContrato/tieneCI/tieneAntec en va_liqMap
+// se llenan sin condicionar al caso NUEVO. Antes esa info solo se mostraba
+// enterrada en la fila de Liquidaciones de los trabajadores NUEVO; esta
+// pestaña la muestra aparte, para quien tenga alguno de los 3 documentos
+// encontrado en el PDF de este mes — no lista a TODOS los activos, porque
+// un trabajador antiguo normalmente no vuelve a traer su Contrato/CI/
+// Antecedentes cada mes (no es un "faltante" real, es esperado que no esté).
+function va_renderContratosLoBarnechea(){
+  if(!va_resultados.length) return '<div class="ch-empty"><div class="ico">📝</div>Sin resultados</div>';
+  const filas=[];
+  va_lhFiltered.forEach(t=>{
+    const w=va_liqMap.get(t.rutNorm);
+    if(!w||!(w.tieneContrato||w.tieneCI||w.tieneAntec))return;
+    const firmaTrab=w.contratoFirmaTrabajador||w.contratoFirmaTrabajadorFisica;
+    const firmaEmp=w.contratoFirmaEmpleador||w.contratoFirmaEmpleadorFisica;
+    let contratoObs;
+    if(!w.tieneContrato)contratoObs='No encontrado en el PDF';
+    else if(firmaTrab&&firmaEmp)contratoObs='Firmado (trabajador y empleador)';
+    else if(w.tieneConstanciaNoFirma)contratoObs='Sin firma '+(!firmaTrab?'trabajador':'empleador')+' — con Constancia DT';
+    else contratoObs='Falta firma '+(!firmaTrab?'trabajador':'empleador');
+    const ok=w.tieneContrato&&firmaTrab&&firmaEmp&&w.tieneCI&&w.tieneAntec;
+    filas.push({rut:t.rut,nombre:t.nombre,contratoObs,ci:!!w.tieneCI,antec:!!w.tieneAntec,estado:ok?'ok':'incompleto'});
+  });
+  if(!filas.length)return '<div class="ch-empty"><div class="ico">📝</div>Ningún trabajador con Contrato/CI/Antecedentes detectado en el PDF de este mes</div>';
+  const completos=filas.filter(f=>f.estado==='ok').length;
+  let h='<div style="background:#eaf6ef;border-radius:7px;padding:10px 14px;font-size:.78rem;margin-bottom:10px">ℹ Solo se listan trabajadores con Contrato, CI o Antecedentes encontrados en el PDF de Liquidaciones de este mes — un trabajador antiguo sin estos documentos este mes no es un "faltante" (su Contrato ya está archivado de otro período).</div>';
+  h+=`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px">
+    <div class="ch-kpi"><div class="v">${filas.length}</div><div class="l">Encontrados en el PDF</div></div>
+    <div class="ch-kpi ok"><div class="v">${completos}</div><div class="l">✅ Completo (Contrato+CI+Antec.)</div></div>
+    <div class="ch-kpi${filas.length-completos?' warn':''}"><div class="v">${filas.length-completos}</div><div class="l">⚠ Incompleto</div></div>
+  </div>`;
+  h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Contrato</th><th>CI</th><th>Antecedentes</th></tr></thead><tbody>';
+  [...filas].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
+    h+=`<tr><td>${f.estado==='ok'?'✅':'⚠'}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td>`+
+      `<td style="font-size:.72rem">${f.contratoObs}</td><td style="text-align:center">${f.ci?'✅':'❌'}</td><td style="text-align:center">${f.antec?'✅':'❌'}</td></tr>`;
+  });
+  h+='</tbody></table>';
   return h;
 }
 

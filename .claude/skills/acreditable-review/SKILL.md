@@ -707,6 +707,31 @@ texto, si `❌` es alcanzable o no) antes de diseñar la abstracción. Mismo
 principio que "no arregles adivinando" del resto de este skill, aplicado
 a refactors en vez de a bugs de lectura.
 
+## Pestaña Contratos nueva en Lo Barnechea: la lectura ya existía, solo faltaba mostrarla
+
+El usuario pidió un módulo de Contratos dedicado en Lo Barnechea (igual que
+ya tiene Antofagasta/Vitacura), pero ahí Contrato/CI/Antecedentes van
+intercalados DENTRO del PDF de Liquidaciones, no en archivos separados.
+Antes de escribir lectura nueva, se confirmó que `w.tieneContrato`/
+`tieneCI`/`tieneAntec`/`contratoFirmaTrabajador(Fisica)`/
+`contratoFirmaEmpleador(Fisica)`/`tieneConstanciaNoFirma` en `va_liqMap` YA
+se llenan para TODOS los trabajadores durante el loop de páginas de
+`va_validarLiquidaciones` — no están condicionados al caso NUEVO. Lo único
+que faltaba era una pestaña que los mostrara aparte; `va_clasificar()` solo
+los usa (rama NUEVO) para decidir docsFalt, nunca los expone para el resto.
+Por eso `va_renderContratosLoBarnechea()` es una función de render pura, sin
+tocar ninguna lógica de detección — mismo espíritu que "grepeá el nombre del
+slot/función antes de asumir que hace falta escribir algo desde cero" de
+más arriba, aplicado a un campo de datos en vez de a un slot completo.
+
+**Decisión de alcance explícita del usuario**: la pestaña lista SOLO a
+quien tenga Contrato, CI o Antecedentes encontrado en el PDF de ESTE mes —
+no a todos los activos. Un trabajador antiguo normalmente no vuelve a traer
+esos documentos cada mes (ya están archivados de otro período), así que
+tratarlo como "❌ faltante" habría sido un falso positivo sistemático, no
+un hallazgo real. Mismo principio que ya aplicaba de forma implícita la
+rama NUEVO de `va_clasificar` — acá se hizo explícito.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
