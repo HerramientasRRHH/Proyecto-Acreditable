@@ -12698,13 +12698,20 @@ async function va_getPdfTextOCR(buf,maxPagesOCR,intentarRotacion,psm){
   maxPagesOCR=maxPagesOCR||30;
   var doc=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
   var total=doc.numPages;var allText='';
+  // Diagnóstico temporal (no cambia ningún resultado, solo cuenta) — para
+  // encontrar por qué un documento real de Finiquitos no dispara NINGÚN
+  // log de OCR (ni éxito ni "OCR failed page") — hay que ver cuál de las 4
+  // condiciones de la línea de abajo está fallando en la corrida real.
+  var diagNativo=0,diagOCRIntentado=0,diagOCRExitoso=0;
   for(var p=1;p<=total;p++){
     var pg=await doc.getPage(p);
     var tc=await pg.getTextContent();
     var items=tc.items||[];
     var txt=items.map(function(it){return it.str;}).join(' ');
+    var txtNativoLen=txt.replace(/\s/g,'').length;
     // If very little text and OCR available and within page limit, try OCR
     if(txt.replace(/\s/g,'').length<40 && total<=maxPagesOCR && typeof Tesseract!=='undefined' && ren_ocrWorker){
+      diagOCRIntentado++;
       try{
         var vp=pg.getViewport({scale:2.5});
         var cv=document.createElement('canvas');cv.width=vp.width;cv.height=vp.height;
@@ -12714,7 +12721,7 @@ async function va_getPdfTextOCR(buf,maxPagesOCR,intentarRotacion,psm){
         var result;
         try{result=await ren_ocrWorker.recognize(blob);}
         finally{if(psm) await ren_ocrWorker.setParameters({tessedit_pageseg_mode:'3'});}
-        if(result&&result.data&&result.data.text) txt=result.data.text;
+        if(result&&result.data&&result.data.text){txt=result.data.text;diagOCRExitoso++;}
       }catch(e){console.warn('OCR failed page',p,e);}
       if(intentarRotacion&&txt.replace(/\s/g,'').length<40&&ren_ocrWorker){
         try{
@@ -12722,9 +12729,10 @@ async function va_getPdfTextOCR(buf,maxPagesOCR,intentarRotacion,psm){
           if(mejorRot&&mejorRot.replace(/\s/g,'').length>txt.replace(/\s/g,'').length) txt=mejorRot;
         }catch(e2){console.warn('OCR rotación fallback pág',p,e2);}
       }
-    }
+    }else if(txtNativoLen>=40){diagNativo++;}
     allText+=txt+'\n';
   }
+  console.log(`[va_getPdfTextOCR] páginas=${total} maxPagesOCR=${maxPagesOCR} (¿total<=maxPagesOCR? ${total<=maxPagesOCR}) Tesseract=${typeof Tesseract!=='undefined'} ren_ocrWorker=${!!ren_ocrWorker} | nativo-suficiente=${diagNativo} OCR-intentado=${diagOCRIntentado} OCR-exitoso=${diagOCRExitoso} | texto total=${allText.replace(/\s/g,'').length} chars`);
   return allText;
 }
 
