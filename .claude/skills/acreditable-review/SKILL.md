@@ -796,6 +796,103 @@ la mejora de velocidad real ni confirmar el resultado final contra un
 archivo de Lo Barnechea real** — misma limitación de sandbox de siempre —
 hace falta que el usuario lo corra y reporte.
 
+## Una corrida real de Antofagasta destapó 4 causas raíz distintas en Mujeres/Discapacidad/Jubilados/Libro
+
+El usuario mandó el Excel exportado de una corrida real (Antofagasta, "Base
+única", 2026-08-17) mostrando fallas severas: Mujeres 0.6% (1/175),
+Discapacidad 0% (0/6), Jubilados 53.3% (49/92), Libro Asistencia con
+`viaOCR: 0` (todo pasando por IA pagada). Se auditó cada una con los
+documentos reales de `Documentos Antofagasta/` (no con muestras ni
+suposiciones) y salieron 4 causas completamente distintas — ninguna era
+"la IA lee mal":
+
+### 1. Candado anti-monto rechaza RUT pegado a número de fila (Mujeres, Jubilados)
+
+El fix de esta misma sesión para Libro de Remuneraciones agregó un candado
+`(?<![\d.,])` al inicio del Patrón 1 de `va_findAllRuts` (RUT no puede estar
+precedido por dígito/punto/coma) para no "morder" RUT reales en tablas
+densas de montos. Efecto secundario no anticipado: en tablas con columna
+`N°` pegada a la columna RUT, el OCR muchas veces junta ambas sin espacio
+(`"119.397.510-0"` = fila `"1"` + RUT real `"19.397.510-0"`) — el candado
+rechaza el RUT completo. Confirmado con PaddleOCR contra la página real
+(`Dotación femenina.pdf`, confianza 0.94-1.00): la LECTURA era perfecta, el
+regex era el problema.
+
+**Fix**: `va_extraerRutConChecksum(linea, referenciaEsperada)` (ya existía,
+usado en Exención de Lo Barnechea) como Nivel 1.5, línea por línea, gateado
+contra el set de RUT ESPERADOS del módulo (mujeres/jubilados de la nómina)
+— nunca "acepta cualquier RUT con checksum válido", solo uno que además
+esté en la referencia real. Aplicado en `va_validarMujeres` y
+`va_validarJubilados` (y por prevención también en `va_validarDiscapacidad`,
+mismo tipo de tabla). Validado: 16/16 RUT rescatados con datos reales de
+Mujeres, 0 falsos positivos (incluye sanity check contra líneas de ruido:
+headers, nombres, números sueltos → ninguno genera un match espurio).
+
+### 2. Documentos escaneados de costado, 90°/270° (Discapacidad, Libro Asistencia)
+
+`Discapacidad.pdf` y las fotos del Libro de Asistencia vienen con el
+contenido rotado ~90° dentro de una hoja en formato vertical —
+`page.rotation` sigue diciendo `0` (no es un flag de PDF, es cómo se
+alimentó la hoja al escáner/cámara). `va_ocrPaginaMejorRotacion` ya existía
+para el caso de 180° (boca abajo) pero nunca probaba 90°/270°, y encima
+ni `va_getPdfTextOCR` ni el OCR del Libro de Asistencia la usaban.
+
+**Fix**: se generalizó `va_ocrPaginaMejorRotacion(page,scale,angulos,worker)`
+para aceptar cualquier lista de ángulos (antes `[0,180]` fijo) — los casos
+90°/270° arman el canvas con ancho/alto TRANSPUESTOS respecto al original
+(a diferencia de 180°, que mantiene la proporción). Verificado con un test
+numérico (sin necesitar screenshot, que no funciona en este sandbox): un
+punto dibujado cerca de la esquina inferior-izquierda del canvas original
+aparece en la esquina superior-izquierda tras rotar 90°, que es
+matemáticamente lo correcto para una rotación horaria.
+
+Se agregó `worker` como parámetro explícito (antes usaba el `ren_ocrWorker`
+global directo) — necesario porque esta función, al estar definida afuera,
+NO ve la sombra local `const ren_ocrWorker=worker` de un
+`procesarArchivoX(buf,worker)` dentro de un pool paralelo (ver sección de
+paralelización más abajo) — sin este parámetro, llamarla desde adentro de
+un archivo paralelizado usaría el worker global equivocado en vez del que
+le tocó a ESE archivo, rompiendo el aislamiento del pool. Default
+`worker||ren_ocrWorker` mantiene compatible el único llamado viejo que no
+pasaba este parámetro.
+
+Se conecta como fallback de costo acotado (solo si la pasada recta a 0° ya
+dio poco texto útil, no en cada página):
+- `va_getPdfTextOCR` (usado por Mujeres/Discapacidad/Jubilados/F30/Libro
+  Remuneraciones y más) — beneficio amplio, un solo punto de cambio.
+- El OCR de `TRABAJADOR_RE` en el Libro de Asistencia de Antofagasta
+  (`va_validarLibroAsist`), pasando explícito el `ren_ocrWorker` LOCAL del
+  archivo (ver el problema del parámetro `worker` arriba).
+
+### 3. Jubilados de Antofagasta = mismo formulario que Exención de Lo Barnechea, sin la misma resiliencia
+
+`Jubilados.pdf` (95 páginas) mezcla 3 páginas de listado tabular (mismo
+problema #1 de arriba) con ~90 páginas de certificado individual AFP —
+estructuralmente IDÉNTICO al formulario de Exención de Cotizar ya resuelto
+en Lo Barnechea (RUT dentro de una casilla que el OCR tiende a destrozar,
+nombre impreso cerca que se lee bien). Pero `va_validarJubilados` nunca
+tuvo el nivel de fallback por nombre que `va_validarExenciones` sí tiene
+— se portó el mismo patrón (Nivel 1.5 checksum + Nivel 1.75 nombre, línea
+y par de líneas consecutivas) validado con un caso sintético que reproduce
+el escenario real (RUT con dígitos confundidos por letras vía OCR, nombre
+en líneas separadas Apellidos/Nombres) — rescata correctamente por nombre
+cuando ni el regex ni el checksum encuentran nada.
+
+**Lección**: cuando dos bases usan el MISMO tipo de documento de origen
+(acá, formulario AFP de exención), la resiliencia de lectura que ya se
+validó en una debería portarse a la otra directamente, no reinventarse
+desde cero con menos niveles — `va_validarJubilados` llevaba toda la
+sesión con un solo nivel (regex puro) mientras el equivalente de Lo
+Barnechea ya tenía 4.
+
+### 4. Código muerto: doble definición de va_getPdfTextOCR
+
+Existían DOS `async function va_getPdfTextOCR` en el archivo — en JS, la
+SEGUNDA declaración con el mismo nombre en el mismo scope gana siempre, así
+que la primera (sin parámetro `maxPagesOCR`) nunca se ejecutaba pasara lo
+que pasara. Se eliminó para que no haya ambigüedad sobre cuál función
+editar la próxima vez.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),

@@ -10915,27 +10915,58 @@ function va_matchRutCercano(rutCandidato,listaValidos){
 // orientaciones y quedarse con la que tenga más coincidencias de fecha/
 // palabras clave es más robusto que asumir que todo el documento viene
 // bien orientado.
-async function va_ocrPaginaMejorRotacion(page,scale){
+// Generalizada de [0,180] a [0,90,180,270] — encontrado con datos reales de
+// Antofagasta (Discapacidad.pdf, Libro de Asistencia): varios documentos
+// vienen escaneados de costado (contenido en horizontal dentro de una hoja
+// vertical), no solo boca abajo. page.rotation sigue dando 0 en estos casos
+// (no es un flag de PDF, es cómo se alimentó la hoja al escáner). Para 90°/
+// 270° el canvas rotado necesita ancho/alto INVERTIDOS respecto al original
+// (a diferencia de 180°, que mantiene la misma proporción) — por eso el caso
+// angulo!==0&&angulo!==180 arma el canvas con dimensiones transpuestas.
+// angulos: lista opcional de ángulos a probar (default [0,180], compatible
+// con el único llamado anterior que no pasaba este parámetro).
+// worker: opcional — el worker de Tesseract a usar. Default: el global
+// ren_ocrWorker (compatible con los llamados existentes). IMPORTANTE pasarlo
+// explícito si se llama desde dentro de un `procesarArchivoX(buf,worker)` de
+// un pool paralelo (ver va_procesarArchivosEnParalelo) — ahí `ren_ocrWorker`
+// es una sombra LOCAL de ESE archivo, pero esta función al estar definida
+// afuera no la ve (cierra sobre el `ren_ocrWorker` global) y usaría el
+// worker equivocado, rompiendo el aislamiento del pool.
+async function va_ocrPaginaMejorRotacion(page,scale,angulos,worker){
   scale=scale||2.5;
-  if(!ren_ocrWorker)return '';
+  angulos=angulos||[0,180];
+  worker=worker||ren_ocrWorker;
+  if(!worker)return '';
   try{
     const vp=page.getViewport({scale});
     const canvas=document.createElement('canvas');
     canvas.width=vp.width;canvas.height=vp.height;
     await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
     let mejorTxt='',mejorScore=-1;
-    for(const angulo of [0,180]){
+    for(const angulo of angulos){
       let cv=canvas;
-      if(angulo){
+      if(angulo===180){
         cv=document.createElement('canvas');
         cv.width=canvas.width;cv.height=canvas.height;
         const rctx=cv.getContext('2d');
         rctx.translate(cv.width,cv.height);rctx.rotate(Math.PI);
         rctx.drawImage(canvas,0,0);
+      }else if(angulo===90){
+        cv=document.createElement('canvas');
+        cv.width=canvas.height;cv.height=canvas.width;
+        const rctx=cv.getContext('2d');
+        rctx.translate(cv.width,0);rctx.rotate(Math.PI/2);
+        rctx.drawImage(canvas,0,0);
+      }else if(angulo===270){
+        cv=document.createElement('canvas');
+        cv.width=canvas.height;cv.height=canvas.width;
+        const rctx=cv.getContext('2d');
+        rctx.translate(0,cv.height);rctx.rotate(-Math.PI/2);
+        rctx.drawImage(canvas,0,0);
       }
       try{
         const blob=await new Promise(res=>cv.toBlob(res,'image/png'));
-        const {data:{text}}=await ren_ocrWorker.recognize(blob);
+        const {data:{text}}=await worker.recognize(blob);
         const score=(text.match(/20\d\d/g)||[]).length+(text.match(/Documento|N[uú]mero|Nombre/gi)||[]).length;
         if(score>mejorScore){mejorScore=score;mejorTxt=text;}
       }catch(e){console.warn('OCR rotación '+angulo+'°:',e);}
@@ -11412,32 +11443,13 @@ async function va_readDocxText(buf){
   }catch(e){console.warn('DOCX read error:',e);return '';}
 }
 
-// ── EXTRACT PDF TEXT con OCR fallback (para docs escaneados) ──
-async function va_getPdfTextOCR(buf){
-  let allText='';
-  try{
-    if(!ren_ocrWorker) await cargarOCR();
-    const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
-    for(let p=1;p<=pdf.numPages;p++){
-      const page=await pdf.getPage(p);
-      const tc=await page.getTextContent();
-      let txt=tc.items.map(x=>x.str).join(' ');
-      if(txt.replace(/\s/g,'').length<40&&ren_ocrWorker){
-        try{
-          const vp=page.getViewport({scale:2.5});
-          const canvas=document.createElement('canvas');
-          canvas.width=vp.width;canvas.height=vp.height;
-          await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
-          const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
-          const {data:{text}}=await ren_ocrWorker.recognize(blob);
-          if(text&&text.replace(/\s/g,'').length>20) txt=text;
-        }catch(ocrErr){console.warn('OCR fallback err:',ocrErr);}
-      }
-      allText+=txt+'\n';
-    }
-  }catch(e){console.warn('PDF OCR error:',e);}
-  return allText;
-}
+// NOTA: había acá una segunda definición de va_getPdfTextOCR(buf) (sin
+// maxPagesOCR) — en JS, dos `function` declaradas con el mismo nombre en el
+// mismo scope hacen que la ÚLTIMA gane siempre, así que esta primera versión
+// nunca se ejecutaba (código muerto, confirmado con grep: cero call sites la
+// usaban a propósito). La versión real y activa es
+// va_getPdfTextOCR(buf,maxPagesOCR) más abajo. Se eliminó para no confundir
+// a futuro sobre cuál función editar.
 
 // ── 4.1 LIQUIDACIONES (page by page) ──
 async function va_validarLiquidaciones(){
@@ -12725,6 +12737,19 @@ async function va_getPdfTextOCR(buf,maxPagesOCR){
         var result=await ren_ocrWorker.recognize(blob);
         if(result&&result.data&&result.data.text) txt=result.data.text;
       }catch(e){console.warn('OCR failed page',p,e);}
+      // Si el OCR derecho (0°) igual dio poco texto útil, la página puede
+      // estar escaneada de costado (90°/270°) — confirmado con datos reales
+      // de Antofagasta (Discapacidad.pdf, Libro de Asistencia): el escaneo
+      // viene en horizontal dentro de una hoja vertical, page.rotation sigue
+      // diciendo 0. Probar las 4 orientaciones y quedarse con la mejor, con
+      // costo extra SOLO para páginas que ya fallaron con la pasada rápida
+      // (ver skill acreditable-review).
+      if(txt.replace(/\s/g,'').length<40&&ren_ocrWorker){
+        try{
+          var mejorRot=await va_ocrPaginaMejorRotacion(pg,2.5,[0,90,180,270]);
+          if(mejorRot&&mejorRot.replace(/\s/g,'').length>txt.replace(/\s/g,'').length) txt=mejorRot;
+        }catch(e2){console.warn('OCR rotación fallback pág',p,e2);}
+      }
     }
     allText+=txt+'\n';
   }
@@ -12887,6 +12912,10 @@ async function va_validarImput(){
 async function va_validarJubilados(){
   var dd=va_docsData['jubilados'];
   if(!dd||!dd.buffers||!dd.buffers.length){va_docResults['jubilados']={nombre:'Listado Jubilados',cargado:false,estado:'—'};return;}
+  // Referencia calculada ANTES del loop — hace falta para los fallbacks de
+  // checksum/nombre de abajo (antes solo se calculaba después, sin fallback).
+  var jubLH=va_lhFiltered.filter(function(x){return x.jubilado;});
+  var jubRutsRef=new Set(jubLH.map(function(x){return x.rutNorm;}));
   var ruts=new Set();
   for(var b of dd.buffers){
     // OJO: va_getPdfTextOCR(buf,maxPagesOCR) NO hace OCR "de las primeras N
@@ -12897,10 +12926,29 @@ async function va_validarJubilados(){
     // con el tope viejo de 10 el archivo entero quedaba sin leer.
     var txt=await va_getPdfTextOCR(b,150);
     va_findAllRuts(txt).forEach(function(r){ruts.add(r);});
+    // El documento real mezcla DOS formatos: unas pocas páginas de listado
+    // tabular (N°/RUT/Nombre, mismo problema de "número de fila pegado al
+    // RUT" que Mujeres/Discapacidad) seguidas de ~90 páginas de certificado
+    // individual AFP (mismo formulario que la Exención de Cotizar de Lo
+    // Barnechea, RUT dentro de una casilla que el OCR tiende a leer mal) —
+    // portamos acá el mismo par de niveles gratis ya validado ahí, línea por
+    // línea sobre el texto ya extraído (ver skill acreditable-review).
+    var lineasJub=txt.split('\n');
+    lineasJub.forEach(function(linea,li){
+      if(!linea.trim())return;
+      // Nivel 1.5: checksum contra la nómina de jubilados
+      var rc=va_extraerRutConChecksum(linea,jubRutsRef);
+      if(rc){ruts.add(rc);return;}
+      // Nivel 1.75: si no se pudo leer/rescatar el RUT en esta línea, probar
+      // por nombre (línea actual y par con la siguiente, por si el layout
+      // separa Apellidos/Nombres).
+      var mJub=va_matchNombreNomina(linea,jubLH);
+      if(!mJub&&li+1<lineasJub.length)mJub=va_matchNombreNomina(linea+' '+lineasJub[li+1],jubLH);
+      if(mJub)ruts.add(mJub.rutNorm);
+    });
   }
   dd.rutsFound=ruts;
-  var jubLH=va_lhFiltered.filter(function(x){return x.jubilado;});
-  var jubRuts=new Set(jubLH.map(function(x){return x.rutNorm;}));
+  var jubRuts=jubRutsRef;
   var coinc=[...jubRuts].filter(function(r){return ruts.has(r);});
   var faltantes=jubLH.filter(function(x){return !ruts.has(x.rutNorm);});
   var extras=[...ruts].filter(function(r){return !jubRuts.has(r)&&!va_isCorpRut(r);});
@@ -13221,8 +13269,19 @@ async function va_validarLibroAsist(){
         const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
         // 1) OCR gratis primero
         try{
-          const {data:{text}}=await ren_ocrWorker.recognize(blob);
-          const m=TRABAJADOR_RE.exec(text);
+          let {data:{text}}=await ren_ocrWorker.recognize(blob);
+          let m=TRABAJADOR_RE.exec(text);
+          // Si el OCR derecho (0°) no encontró la etiqueta "TRABAJADOR SR.",
+          // la foto puede estar de costado (90°/270°) — confirmado con datos
+          // reales: las fotos del Libro de Antofagasta vienen escaneadas en
+          // horizontal dentro de una hoja vertical. Reintentar con las 4
+          // orientaciones, pasando explícito el worker de ESTE archivo (no el
+          // global) para no romper el aislamiento del pool paralelo.
+          if(!m){
+            const textoRot=await va_ocrPaginaMejorRotacion(page,2.6,[0,90,180,270],ren_ocrWorker);
+            const mRot=TRABAJADOR_RE.exec(textoRot||'');
+            if(mRot){text=textoRot;m=mRot;}
+          }
           if(m){
             const candidato=m[1].trim();
             const match=va_matchNombreNomina(candidato,va_lhFiltered);
@@ -13317,6 +13376,11 @@ function va_parseCartaFeErratas(txt){
 async function va_validarMujeres(){
   var dd=va_docsData['mujeres'];
   if(!dd||!dd.buffers||!dd.buffers.length){va_docResults['mujeres']={nombre:'Acreditación Mujeres',cargado:false,estado:'—'};return;}
+  // Referencia calculada ANTES del loop (antes iba después) — hace falta acá
+  // para el fallback de checksum de abajo, que necesita saber contra qué
+  // nómina validar cada candidato.
+  var mujeresLH=va_lhFiltered.filter(function(x){return x.sexo==='F'||x.sexo==='FEMENINO';});
+  var mujRuts=new Set(mujeresLH.map(function(x){return x.rutNorm;}));
   var ruts=new Set();
   for(var bi=0;bi<dd.buffers.length;bi++){
     var b=dd.buffers[bi];
@@ -13332,12 +13396,21 @@ async function va_validarMujeres(){
           rows.forEach(function(row){if(row)row.forEach(function(cell){if(cell)va_findAllRuts(String(cell)).forEach(function(r){ruts.add(r);});});});});
       }catch(e){console.warn('Mujeres: error leyendo Excel',e);}
     }else{
-      va_findAllRuts(await va_getPdfTextOCR(b,20)).forEach(function(r){ruts.add(r);});
+      var txtMuj=await va_getPdfTextOCR(b,20);
+      va_findAllRuts(txtMuj).forEach(function(r){ruts.add(r);});
+      // Nivel 1.5: checksum contra la nómina de mujeres, línea por línea —
+      // rescata RUTs donde el OCR pegó el número de fila justo antes del RUT
+      // sin espacio (ej. "119.397.510-0" = fila "1" + RUT real "19.397.510-0"),
+      // que el candado anti-monto de va_findAllRuts (?<![\d.,]) rechaza a
+      // propósito (ver skill acreditable-review). Validado con datos reales:
+      // 16/16 RUT rescatados, 0 falsos positivos.
+      txtMuj.split('\n').forEach(function(linea){
+        var rc=va_extraerRutConChecksum(linea,mujRuts);
+        if(rc)ruts.add(rc);
+      });
     }
   }
   dd.rutsFound=ruts;
-  var mujeresLH=va_lhFiltered.filter(function(x){return x.sexo==='F'||x.sexo==='FEMENINO';});
-  var mujRuts=new Set(mujeresLH.map(function(x){return x.rutNorm;}));
   var coinc=[...mujRuts].filter(function(r){return ruts.has(r);});
   var faltantes=mujeresLH.filter(function(x){return !ruts.has(x.rutNorm);});
   var extras=[...ruts].filter(function(r){return !mujRuts.has(r)&&!va_isCorpRut(r);});
@@ -13353,13 +13426,21 @@ async function va_validarMujeres(){
 async function va_validarDiscapacidad(){
   var dd=va_docsData['discapacidad'];
   if(!dd||!dd.buffers||!dd.buffers.length){va_docResults['discapacidad']={nombre:'Personal Discapacitado',cargado:false,estado:'—'};return;}
+  var discLHref=va_lhFiltered.filter(function(x){return x.discapacidad;});
+  var discRutsRef=new Set(discLHref.map(function(x){return x.rutNorm;}));
   var ruts=new Set();
   for(var b of dd.buffers){
     var txt=await va_getPdfTextOCR(b,15);
     va_findAllRuts(txt).forEach(function(r){ruts.add(r);});
+    // Nivel 1.5: mismo fallback de checksum que Mujeres/Jubilados — ver skill
+    // acreditable-review ("candado anti-monto rechaza RUT pegado a número de fila").
+    txt.split('\n').forEach(function(linea){
+      var rc=va_extraerRutConChecksum(linea,discRutsRef);
+      if(rc)ruts.add(rc);
+    });
   }
   dd.rutsFound=ruts;
-  var discLH=va_lhFiltered.filter(function(x){return x.discapacidad;});
+  var discLH=discLHref;
   var discRuts=new Set(discLH.map(function(x){return x.rutNorm;}));
   var coinc=[...discRuts].filter(function(r){return ruts.has(r);});
   var faltantesLH=discLH.filter(function(x){return !ruts.has(x.rutNorm);});
