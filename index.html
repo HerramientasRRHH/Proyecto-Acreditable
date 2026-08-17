@@ -12696,6 +12696,18 @@ function va_clasificar(t,liq){
 // comparten el mismo ren_ocrWorker.
 async function va_getPdfTextOCR(buf,maxPagesOCR,intentarRotacion,psm){
   maxPagesOCR=maxPagesOCR||30;
+  // Ninguno de los llamadores de esta función (Finiquitos, F30-1/PreviRed,
+  // carta de finiquito pendiente, etc.) carga el OCR por su cuenta — todos
+  // dependían de que va_validarLiquidaciones ya lo hubiera hecho antes en
+  // la misma corrida. Pero esa función corta con un return inmediato si el
+  // slot 'liq' no tiene archivos cargados ese mes/letra, sin llegar nunca a
+  // cargarOCR() — dejando ren_ocrWorker en null para siempre y el gate de
+  // OCR de abajo silenciosamente en false (0 intentos, 0 error). Confirmado
+  // con un Finiquitos.pdf real: 27 páginas, 0% texto nativo, muy por debajo
+  // del tope de páginas — el problema no era el tope, era que nadie había
+  // cargado el motor. Se auto-carga acá para que la función sea autónoma
+  // sin importar qué otro módulo corrió antes.
+  if(!ren_ocrWorker) await cargarOCR();
   var doc=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
   var total=doc.numPages;var allText='';
   // Diagnóstico temporal (no cambia ningún resultado, solo cuenta) — para
