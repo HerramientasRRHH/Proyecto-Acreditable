@@ -1178,6 +1178,45 @@ reportarse después de una corrida fresca, investigar de nuevo con datos
 reales, no asumir que es el mismo bug de Contratos solo por la
 coincidencia de síntomas.
 
+## Revertidos los 3 "mecanismos" de MVM y la pestaña Contratos Lo Barnechea — decisión explícita del usuario
+
+Después de la ronda de arreglos reales de lectura (secciones de arriba,
+todos disparados por reportes de bugs del usuario), el usuario pidió
+volver el archivo al estado de ANTES de evaluar MOTOR VISUAL MULTICAPA,
+manteniendo solo las mejoras de lectura/OCR reales. Se identificaron y
+revirtieron limpiamente (`git diff eebfb99 8ba7b59 -- index.html` en
+reversa, sin conflictos — confirma que ningún arreglo posterior tocó las
+mismas líneas):
+
+- **Mecanismo 1** (`va_registrarResolucion`, `va_iaMetricas`, extensión de
+  `va_renderIAAuditSection`) — commit `084522b`.
+- **Mecanismo 3** (`licMedPaginas`, `cubiertosDetalle` en Exención/
+  Licencias — NO confundir con `libroPaginas` del Libro de Asistencia, que
+  es de ANTES de MVM, un pedido real del usuario, y sigue existiendo) —
+  commit `df24996`.
+- **Pestaña Contratos en Lo Barnechea/Las Condes/Mejillones**
+  (`va_renderContratosLoBarnechea`, dispatch en `va_subtab`) — commit
+  `8ba7b59`.
+
+**Las secciones de este Skill que documentan estos 3 mecanismos (arriba,
+tituladas "Escalera de confianza...", "Evidencia con página + confianza
+por dato", y "Nueva pestaña Contratos...") describen código que YA NO
+EXISTE.** Se dejan como registro histórico de qué se intentó y por qué se
+sacó — no como referencia de código actual. Si en el futuro se quiere
+retomar alguna de estas ideas, hay que revisar si siguen aplicando contra
+el código de ESE momento, no asumir que el código descrito ahí sigue ahí.
+
+**Lo que SÍ se mantuvo** (no es "MVM", son arreglos reales disparados por
+reportes de bugs del propio usuario, verificados uno por uno que no
+dependían de nada del Grupo A antes de revertir): rescate de RUT pegado a
+fila en Mujeres/Discapacidad/Jubilados, resiliencia de Exención portada a
+Jubilados, OCR conectado en F30-1/PreviRed, Contratos Antofagasta
+soportando archivos agrupados, y el fix de "Base única" no filtrando por
+sub-área. La paralelización de `va_validarLiquidaciones` (commit
+`ebf68eb`, también parte de la misma ronda) ya se había revertido antes
+por separado (causó 2 corridas reales colgadas — ver sección
+correspondiente arriba).
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),

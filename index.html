@@ -10644,18 +10644,6 @@ let va_iaDiag=null; // {configurada,paginasOk,paginasError} — diagnóstico de 
 // reproducir el llamado a mano con scripts cada vez — ver skill
 // acreditable-review para el proceso que esto reemplaza/acelera.
 let va_iaAuditLog=[]; // {modulo,pagina,tipo,nombreLeido,rutLeido,resultado,atribuidoA,motivo}
-// Métricas de "escalera de confianza": cuenta, por módulo, cuántas resoluciones
-// se lograron gratis (regex/OCR/nombre local) vs. con IA vs. sin resolver —
-// responde con números reales cuánta IA hace falta de verdad, en vez de intuición.
-// Patrón inspirado en MOTOR VISUAL MULTICAPA (perception/confidence_router.py +
-// escalation.py) — ver sección "Escalera de confianza" en el Skill acreditable-review.
-let va_iaMetricas={}; // {[modulo]:{gratis,ia,sinResolver}}
-function va_registrarResolucion(modulo,via){
-  if(!va_iaMetricas[modulo])va_iaMetricas[modulo]={gratis:0,ia:0,sinResolver:0};
-  if(via==='gratis')va_iaMetricas[modulo].gratis++;
-  else if(via==='ia')va_iaMetricas[modulo].ia++;
-  else va_iaMetricas[modulo].sinResolver++;
-}
 let va_periodoMes=null,va_periodoAnio=null; // Fix 1: periodo extraído del LH
 
 // ── HELPERS ──
@@ -11935,9 +11923,6 @@ async function va_validarLiquidaciones(){
               if(libroFaltasIA!=null) wLibro.libroFaltasIA=(wLibro.libroFaltasIA||0)+libroFaltasIA;
               if(libroPermisosIA!=null) wLibro.libroPermisosIA=(wLibro.libroPermisosIA||0)+libroPermisosIA;
               if(libroLicDiasIA!=null) wLibro.libroLicDiasIA=(wLibro.libroLicDiasIA||0)+libroLicDiasIA;
-              va_registrarResolucion('Libro de Asistencia','ia');
-            } else {
-              va_registrarResolucion('Libro de Asistencia','sinResolver');
             }
           } else {
             // Sin nombre leído (heurística vieja sin IA disponible): único
@@ -11945,7 +11930,6 @@ async function va_validarLiquidaciones(){
             w.tieneLibro = true;
             if(!w.libroPaginas)w.libroPaginas=[];
             if(!w.libroPaginas.includes(p))w.libroPaginas.push(p);
-            va_registrarResolucion('Libro de Asistencia','gratis');
           }
         }
         if(licMedIA){
@@ -11974,11 +11958,6 @@ async function va_validarLiquidaciones(){
           }
           if(wLic){
             wLic.tieneLicMed=true;
-            // Página(s) donde se encontró la Licencia Médica de este trabajador
-            // — mismo patrón que libroPaginas, para depurar más rápido futuros
-            // "no lo detectó" sin tener que reproducir la corrida completa.
-            if(!wLic.licMedPaginas)wLic.licMedPaginas=[];
-            if(!wLic.licMedPaginas.includes(p))wLic.licMedPaginas.push(p);
             const mIni=(licMedIA.fechaInicio||'').match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
             const mFin=(licMedIA.fechaTermino||'').match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
             if(va_periodoMes&&va_periodoAnio&&mIni){
@@ -12300,12 +12279,6 @@ async function va_validarExenciones(){
   const jubRutSet=new Set(jubLH.map(x=>x.rutNorm));
   const iaKeyOk=!!(document.getElementById('iav-key')&&document.getElementById('iav-key').value);
   let paginasIA=0;
-  // Página(s) donde se encontró la exención de cada RUT — mismo patrón que
-  // libroPaginas/licMedPaginas, para poder mostrar dónde se encontró cada uno
-  // en vez de solo sí/no.
-  const paginasPorRut=new Map();
-  const regPag=(rut,p)=>{if(!paginasPorRut.has(rut))paginasPorRut.set(rut,[]);
-    if(!paginasPorRut.get(rut).includes(p))paginasPorRut.get(rut).push(p);};
   for(const buf of dd.buffers){
     if(!ren_ocrWorker) await cargarOCR();
     const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
@@ -12327,11 +12300,11 @@ async function va_validarExenciones(){
       }
       const encontrados=va_findAllRuts(txt);
       let matchEnPagina=false;
-      encontrados.forEach(r=>{va_addRut(ruts,r);if(jubRutSet.has(r)){matchEnPagina=true;regPag(r,p);}});
-      if(matchEnPagina){va_registrarResolucion('Exención Cotizar','gratis');continue;}
+      encontrados.forEach(r=>{va_addRut(ruts,r);if(jubRutSet.has(r))matchEnPagina=true;});
+      if(matchEnPagina)continue;
       // Nivel 1.5: checksum contra la nómina de jubilados, sin IA
       const rutChecksum=va_extraerRutConChecksum(txt,jubRutSet);
-      if(rutChecksum){va_addRut(ruts,rutChecksum);regPag(rutChecksum,p);va_registrarResolucion('Exención Cotizar','gratis');continue;}
+      if(rutChecksum){va_addRut(ruts,rutChecksum);continue;}
       // Nivel 1.75: el RUT de estos formularios AFP a veces viene escrito a
       // mano en casillas separadas ("RUT| |7[1[9") y el OCR lo destroza —
       // pero el NOMBRE suele estar impreso/tipeado cerca y SÍ se lee bien.
@@ -12351,11 +12324,9 @@ async function va_validarExenciones(){
       }
       if(matchPorNombre){
         va_addRut(ruts,matchPorNombre.rutNorm);
-        regPag(matchPorNombre.rutNorm,p);
         va_iaAuditLog.push({modulo:'Exención Cotizar',pagina:p,tipo:'EXENCION_AFP',
           nombreLeido:matchPorNombre.nombre,resultado:'match',atribuidoA:matchPorNombre.nombre,
           motivo:'RUT no reconocible por OCR (manuscrito) — atribuido por nombre en el texto OCR, sin gastar IA'});
-        va_registrarResolucion('Exención Cotizar','gratis');
         continue;
       }
       // Nivel 2: IA visual, solo si hay key configurada — la página quedó sin
@@ -12369,13 +12340,11 @@ async function va_validarExenciones(){
             nombreLeido:leido.nombre,rutLeido:leido.rut||null,resultado:match?'match':'sin_match',
             atribuidoA:match?match.nombre:null,
             motivo:match?null:'nombre leído no coincide con ningún jubilado de la nómina'});
-          if(match){va_addRut(ruts,match.rutNorm);regPag(match.rutNorm,p);va_registrarResolucion('Exención Cotizar','ia');}
-          else va_registrarResolucion('Exención Cotizar','sinResolver');
+          if(match)va_addRut(ruts,match.rutNorm);
         }else if(leido){
           va_iaAuditLog.push({modulo:'Exención Cotizar',pagina:p,tipo:'EXENCION_AFP',
             nombreLeido:null,resultado:'sin_lectura',atribuidoA:null,
             motivo:'la IA no identificó ningún nombre en la página'});
-          va_registrarResolucion('Exención Cotizar','sinResolver');
         }
       }
     }
@@ -12384,8 +12353,6 @@ async function va_validarExenciones(){
   const cubiertos=jubLH.filter(x=>ruts.has(x.rutNorm));
   const faltantes=jubLH.filter(x=>!ruts.has(x.rutNorm));
   va_docResults['exencion']={nombre:'3.5 Exención Cotizar',cargado:true,totalLH:jubLH.length,cubiertos:cubiertos.length,
-    cubiertosDetalle:cubiertos.map(x=>({rut:x.rut,nombre:x.nombre,
-      pagina:(paginasPorRut.get(x.rutNorm)||[]).join(', ')||'—'})),
     faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre})),paginasIA:paginasIA,
     estado:faltantes.length===0?'✅':(faltantes.length<=2?'⚠':'❌')};
   return{cargado:true,ruts};
@@ -13352,8 +13319,7 @@ async function va_validarLibroAsist(){
         }
       }catch(pageErr){console.warn('Libro Antofagasta pág '+totalPags,pageErr);}
       if(matchWorker){
-        if(fuente==='OCR'){viaOCR++;va_registrarResolucion('Libro de Asistencia (Antofagasta)','gratis');}
-        else{viaIA++;va_registrarResolucion('Libro de Asistencia (Antofagasta)','ia');}
+        if(fuente==='OCR')viaOCR++;else viaIA++;
         const rutM=matchWorker.rutNorm;
         if(!va_liqMap.has(rutM))va_liqMap.set(rutM,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
           tieneComprobante:false,tieneLibro:false,tieneContrato:false,tieneCI:false,tieneAntec:false,tieneLicMed:false,tieneLiq:false,tieneCertVacac:false,tieneCartaNoFirmaLiq:false});
@@ -13363,7 +13329,6 @@ async function va_validarLibroAsist(){
           nombreLeido,resultado:'match',atribuidoA:matchWorker.nombre,motivo:null});
       }else{
         sinIdentificar++;
-        va_registrarResolucion('Libro de Asistencia (Antofagasta)','sinResolver');
         va_iaAuditLog.push({modulo:'Libro de Asistencia (Antofagasta)',pagina:totalPags,tipo:'LIBRO_ASISTENCIA',
           nombreLeido,resultado:nombreLeido?'sin_match':'sin_lectura',atribuidoA:null,
           motivo:nombreLeido?'nombre leído no coincide con nadie de la nómina':'ni OCR ni IA lograron leer un nombre en la página'});
@@ -14010,7 +13975,7 @@ async function va_ejecutar(){
   if(!va_lhFiltered.length){toast('Selecciona base y sector');return;}
   document.getElementById('va-prog').style.display='block';
   document.getElementById('va-card-result').style.display='none';
-  va_resultados=[];va_docResults={};va_iaAuditLog=[];va_iaMetricas={};
+  va_resultados=[];va_docResults={};va_iaAuditLog=[];
   // Helper para progreso con página actual
   const setPg=(p,msg,extra='')=>{
     va_setProg(p,msg);
@@ -14103,7 +14068,7 @@ function va_renderResultados(){
   // Sub-tabs: one per document type
   const baseTabs=['liq','finiq','licencias','exencion','f30','f301','previred'];
   const basesConLicEnLiqTabs=['Lo Barnechea','Las Condes','Mejillones'];
-  if(basesConLicEnLiqTabs.includes(va_baseKey)){baseTabs.push('libro','contratos');}
+  if(basesConLicEnLiqTabs.includes(va_baseKey)){baseTabs.push('libro');}
   if(va_baseKey==='Antofagasta'){baseTabs.push('imput','jubilados','anexos','cartanofirma','librorem','libroasist','mujeres','discapacidad','contratos');}
   if(va_baseKey==='Vitacura'){baseTabs.push('contratos','nominas','epp','libroasist','subcontrato');}
   const tabs=baseTabs;
@@ -14140,7 +14105,6 @@ function va_subtab(tab){
   else if(tab==='subcontrato') c.innerHTML=va_renderSubcontrato();
   else if(tab==='contratos'&&va_baseKey==='Vitacura') c.innerHTML=va_renderContratosVitacura();
   else if(tab==='contratos'&&va_baseKey==='Antofagasta') c.innerHTML=va_renderContratosAntofagasta();
-  else if(tab==='contratos'&&['Lo Barnechea','Las Condes','Mejillones'].includes(va_baseKey)) c.innerHTML=va_renderContratosLoBarnechea();
   else c.innerHTML=va_renderCruceTab(tab);
 }
 
@@ -14424,8 +14388,7 @@ function va_renderLicencias(){
       if(!tiene){estado='❌';obs='Sin evidencia en el PDF';}
       else if(diasDoc!=null&&diasDoc!==x.diasLic){estado='⚠';obs=`Días no coinciden (LH=${x.diasLic}, doc=${diasDoc})`;}
       else{estado='✅';obs=diasDoc!=null?'Días coinciden':'Encontrada — no se pudo leer días del doc';}
-      const pagina=(w&&w.licMedPaginas&&w.licMedPaginas.length)?w.licMedPaginas.join(', '):'—';
-      return{rut:x.rut,nombre:x.nombre,diasLic:x.diasLic,estado,obs,pagina};
+      return{rut:x.rut,nombre:x.nombre,diasLic:x.diasLic,estado,obs};
     });
     const ok=filas.filter(f=>f.estado==='✅').length;
     const warn=filas.filter(f=>f.estado==='⚠').length;
@@ -14436,9 +14399,9 @@ function va_renderLicencias(){
       <div class="ch-kpi${warn?' warn':''}"><div class="v">${warn}</div><div class="l">Días no coinciden</div></div>
       <div class="ch-kpi${falt?' err':''}"><div class="v">${falt}</div><div class="l">Sin evidencia</div></div>
     </div>`;
-    h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Días LH</th><th>Pág.</th><th>Observación</th></tr></thead><tbody>';
+    h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Días LH</th><th>Observación</th></tr></thead><tbody>';
     filas.sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
-      h+=`<tr><td>${f.estado}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLic}</td><td style="text-align:center;font-size:.72rem">${f.pagina}</td><td style="font-size:.72rem">${f.obs}</td></tr>`;
+      h+=`<tr><td>${f.estado}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLic}</td><td style="font-size:.72rem">${f.obs}</td></tr>`;
     });
     h+='</tbody></table>';
     h+=va_renderIAAuditSection('Licencia Médica (inline)');
@@ -14493,14 +14456,6 @@ function va_renderExencion(){
     [...d.faltantes].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{h+=`<tr><td>${f.rut}</td><td>${f.nombre}</td></tr>`;});
     h+='</tbody></table>';
   }else{h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los jubilados del LH tienen exención</div>';}
-  if((d.cubiertosDetalle||[]).length){
-    h+='<details style="margin-top:10px"><summary style="cursor:pointer;font-size:.78rem;color:#375">Ver dónde se encontró cada uno ('+d.cubiertosDetalle.length+')</summary>';
-    h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th><th>Pág.</th></tr></thead><tbody>';
-    [...d.cubiertosDetalle].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
-      h+=`<tr><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center;font-size:.72rem">${f.pagina}</td></tr>`;
-    });
-    h+='</tbody></table></details>';
-  }
   h+=va_renderIAAuditSection('Exención Cotizar');
   return h;
 }
@@ -14515,25 +14470,12 @@ function va_renderExencion(){
 function va_renderIAAuditSection(nombreModulo){
   const nombres=Array.isArray(nombreModulo)?nombreModulo:[nombreModulo];
   const entradas=va_iaAuditLog.filter(e=>nombres.includes(e.modulo));
-  // Métricas de escalera de confianza (gratis/IA/sin resolver) — independientes
-  // de si hubo o no lecturas con IA registradas en va_iaAuditLog, porque un
-  // módulo puede resolverse 100% gratis (regex/checksum) sin nunca llegar a
-  // gastar IA, y ese caso es justamente el más interesante de mostrar.
-  const metricas=nombres.reduce((acc,n)=>{
-    const m=va_iaMetricas[n];if(!m)return acc;
-    acc.gratis+=m.gratis;acc.ia+=m.ia;acc.sinResolver+=m.sinResolver;return acc;
-  },{gratis:0,ia:0,sinResolver:0});
-  const totalMetricas=metricas.gratis+metricas.ia+metricas.sinResolver;
-  const metricasHtml=totalMetricas?`<div style="background:#eef4fb;border-radius:7px;padding:8px 12px;font-size:.74rem;margin-bottom:10px">
-    📊 De ${totalMetricas} resolución(es): <strong>${metricas.gratis} sin gastar IA</strong> (${Math.round(metricas.gratis/totalMetricas*100)}%)
-    ${metricas.ia?`, ${metricas.ia} con IA`:''}${metricas.sinResolver?`, ${metricas.sinResolver} sin resolver`:''}
-  </div>`:'';
-  if(!entradas.length) return metricasHtml;
+  if(!entradas.length) return '';
   const matches=entradas.filter(x=>x.resultado==='match'||x.resultado==='firma_trabajador'||x.resultado==='firma_empleador').length;
   const sinMatch=entradas.filter(x=>x.resultado==='sin_match').length;
   const sinLectura=entradas.filter(x=>x.resultado==='sin_lectura').length;
   const iconos={match:'✅',firma_trabajador:'✅ (trabajador)',firma_empleador:'✅ (empleador)',sin_match:'⚠',sin_lectura:'⚠'};
-  let h=metricasHtml+`<div class="ch-section-title" style="margin-top:18px">🔍 Detalle de lectura con IA — ${entradas.length} página(s)</div>`;
+  let h=`<div class="ch-section-title" style="margin-top:18px">🔍 Detalle de lectura con IA — ${entradas.length} página(s)</div>`;
   h+=`<div style="background:#eaf6ef;border-radius:7px;padding:8px 12px;font-size:.74rem;margin-bottom:10px">ℹ "Sin match" = la IA leyó un nombre pero no coincide con nadie de la nómina — revisar la página real antes de asumir que el documento falta.</div>`;
   h+=`<div style="display:flex;gap:14px;margin-bottom:10px;flex-wrap:wrap;font-size:.74rem">
     <span style="color:#16613a">✅ ${matches} atribuida(s)</span>
@@ -14870,50 +14812,6 @@ function va_renderContratosAntofagasta(){
   }
   h+='<details style="margin-top:14px"><summary style="font-size:.76rem;color:#888;cursor:pointer">🔍 Ver lectura página por página con IA (detalle técnico)</summary>'
     +va_renderIAAuditSection('Contrato (Antofagasta)')+'</details>';
-  return h;
-}
-
-// ── Contratos (Lo Barnechea / Las Condes / Mejillones) ──
-// A diferencia de Antofagasta/Vitacura, acá Contrato/CI/Antecedentes van
-// intercalados DENTRO del PDF de Liquidaciones (mismo archivo), y ya se
-// detectan página por página para TODOS los trabajadores (no solo los
-// nuevos del período) — w.tieneContrato/tieneCI/tieneAntec en va_liqMap
-// se llenan sin condicionar al caso NUEVO. Antes esa info solo se mostraba
-// enterrada en la fila de Liquidaciones de los trabajadores NUEVO; esta
-// pestaña la muestra aparte, para quien tenga alguno de los 3 documentos
-// encontrado en el PDF de este mes — no lista a TODOS los activos, porque
-// un trabajador antiguo normalmente no vuelve a traer su Contrato/CI/
-// Antecedentes cada mes (no es un "faltante" real, es esperado que no esté).
-function va_renderContratosLoBarnechea(){
-  if(!va_resultados.length) return '<div class="ch-empty"><div class="ico">📝</div>Sin resultados</div>';
-  const filas=[];
-  va_lhFiltered.forEach(t=>{
-    const w=va_liqMap.get(t.rutNorm);
-    if(!w||!(w.tieneContrato||w.tieneCI||w.tieneAntec))return;
-    const firmaTrab=w.contratoFirmaTrabajador||w.contratoFirmaTrabajadorFisica;
-    const firmaEmp=w.contratoFirmaEmpleador||w.contratoFirmaEmpleadorFisica;
-    let contratoObs;
-    if(!w.tieneContrato)contratoObs='No encontrado en el PDF';
-    else if(firmaTrab&&firmaEmp)contratoObs='Firmado (trabajador y empleador)';
-    else if(w.tieneConstanciaNoFirma)contratoObs='Sin firma '+(!firmaTrab?'trabajador':'empleador')+' — con Constancia DT';
-    else contratoObs='Falta firma '+(!firmaTrab?'trabajador':'empleador');
-    const ok=w.tieneContrato&&firmaTrab&&firmaEmp&&w.tieneCI&&w.tieneAntec;
-    filas.push({rut:t.rut,nombre:t.nombre,contratoObs,ci:!!w.tieneCI,antec:!!w.tieneAntec,estado:ok?'ok':'incompleto'});
-  });
-  if(!filas.length)return '<div class="ch-empty"><div class="ico">📝</div>Ningún trabajador con Contrato/CI/Antecedentes detectado en el PDF de este mes</div>';
-  const completos=filas.filter(f=>f.estado==='ok').length;
-  let h='<div style="background:#eaf6ef;border-radius:7px;padding:10px 14px;font-size:.78rem;margin-bottom:10px">ℹ Solo se listan trabajadores con Contrato, CI o Antecedentes encontrados en el PDF de Liquidaciones de este mes — un trabajador antiguo sin estos documentos este mes no es un "faltante" (su Contrato ya está archivado de otro período).</div>';
-  h+=`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px">
-    <div class="ch-kpi"><div class="v">${filas.length}</div><div class="l">Encontrados en el PDF</div></div>
-    <div class="ch-kpi ok"><div class="v">${completos}</div><div class="l">✅ Completo (Contrato+CI+Antec.)</div></div>
-    <div class="ch-kpi${filas.length-completos?' warn':''}"><div class="v">${filas.length-completos}</div><div class="l">⚠ Incompleto</div></div>
-  </div>`;
-  h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Contrato</th><th>CI</th><th>Antecedentes</th></tr></thead><tbody>';
-  [...filas].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
-    h+=`<tr><td>${f.estado==='ok'?'✅':'⚠'}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td>`+
-      `<td style="font-size:.72rem">${f.contratoObs}</td><td style="text-align:center">${f.ci?'✅':'❌'}</td><td style="text-align:center">${f.antec?'✅':'❌'}</td></tr>`;
-  });
-  h+='</tbody></table>';
   return h;
 }
 
