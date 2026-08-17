@@ -638,6 +638,42 @@ métricas + detalle sin romper el render existente cuando ambos coexisten.
 Reset: `va_iaMetricas={}` se limpia junto con `va_iaAuditLog=[]` al arrancar
 `va_ejecutar()` — si se agrega un reset nuevo en otro lugar, no olvidar este.
 
+## Evidencia con página por dato: generalizar el patrón, no reinventarlo por módulo
+
+El Libro de Asistencia (Lo Barnechea) ya guardaba `libroPaginas` (array de
+páginas donde se encontró el match de cada trabajador) — se generalizó el
+MISMO patrón, mismo shape (`if(!X.campo)X.campo=[]; if(!X.campo.includes(p))
+X.campo.push(p);`), a dos módulos más:
+
+- **Licencia Médica inline** (`va_validarLiquidaciones`, bloque `licMedIA`):
+  nuevo campo `licMedPaginas` en el objeto de `va_liqMap` (`wLic`), poblado en
+  el mismo punto donde ya se marca `wLic.tieneLicMed=true` — sea que `wLic`
+  venga del match por nombre o del rastreo de RUT pegajoso (`w`), ambos casos
+  quedan cubiertos porque el campo se agrega DESPUÉS de que `wLic` ya está
+  resuelto a uno u otro. Columna "Pág." nueva en la tabla de detalle de
+  `va_renderLicencias()` (rama `basesConLicEnLiq`).
+- **Exención de Cotizar** (`va_validarExenciones`): a diferencia del Libro,
+  acá no hay un objeto persistente por trabajador (`va_liqMap`) — es un
+  `Set` plano de RUTs encontrados. Se agregó un `Map` local
+  `paginasPorRut`+helper `regPag(rut,p)` dentro de la función, llamado en
+  los 4 puntos de resolución (Nivel 1/1.5/1.75/IA, los mismos que ya
+  instrumenta la escalera de confianza de arriba), y se expone en
+  `va_docResults['exencion'].cubiertosDetalle` (nuevo campo, no reemplaza
+  `cubiertos`/`faltantes` que ya existían). El render (`va_renderExencion`)
+  lo muestra en un `<details>` colapsado por defecto ("Ver dónde se encontró
+  cada uno") — no se agregó una tabla abierta por defecto porque antes no
+  existía ningún listado de "cubiertos" en pantalla, solo el contador; una
+  tabla nueva abierta habría sido ruido para el caso común (todo ✅).
+
+**Antes de replicar este patrón a un módulo nuevo**: fijarse si ya existe un
+objeto persistente por trabajador para ese módulo (`va_liqMap` para todo lo
+que vive dentro de Liquidaciones/Libro/Contrato) o si hay que crear un `Map`
+local como en Exención — son dos formas del mismo patrón, no dos patrones
+distintos, y la decisión depende solo de si el módulo ya tenía ese objeto o
+no. Verificado en consola de navegador con datos sintéticos (mismo shape que
+los reales): sin duplicados al registrar la misma página dos veces, columna
+"Pág." y `<details>` renderizan correctamente.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),

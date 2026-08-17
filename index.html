@@ -11948,6 +11948,11 @@ async function va_validarLiquidaciones(){
           }
           if(wLic){
             wLic.tieneLicMed=true;
+            // Página(s) donde se encontró la Licencia Médica de este trabajador
+            // — mismo patrón que libroPaginas, para depurar más rápido futuros
+            // "no lo detectó" sin tener que reproducir la corrida completa.
+            if(!wLic.licMedPaginas)wLic.licMedPaginas=[];
+            if(!wLic.licMedPaginas.includes(p))wLic.licMedPaginas.push(p);
             const mIni=(licMedIA.fechaInicio||'').match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
             const mFin=(licMedIA.fechaTermino||'').match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
             if(va_periodoMes&&va_periodoAnio&&mIni){
@@ -12269,6 +12274,12 @@ async function va_validarExenciones(){
   const jubRutSet=new Set(jubLH.map(x=>x.rutNorm));
   const iaKeyOk=!!(document.getElementById('iav-key')&&document.getElementById('iav-key').value);
   let paginasIA=0;
+  // Página(s) donde se encontró la exención de cada RUT — mismo patrón que
+  // libroPaginas/licMedPaginas, para poder mostrar dónde se encontró cada uno
+  // en vez de solo sí/no.
+  const paginasPorRut=new Map();
+  const regPag=(rut,p)=>{if(!paginasPorRut.has(rut))paginasPorRut.set(rut,[]);
+    if(!paginasPorRut.get(rut).includes(p))paginasPorRut.get(rut).push(p);};
   for(const buf of dd.buffers){
     if(!ren_ocrWorker) await cargarOCR();
     const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
@@ -12290,11 +12301,11 @@ async function va_validarExenciones(){
       }
       const encontrados=va_findAllRuts(txt);
       let matchEnPagina=false;
-      encontrados.forEach(r=>{va_addRut(ruts,r);if(jubRutSet.has(r))matchEnPagina=true;});
+      encontrados.forEach(r=>{va_addRut(ruts,r);if(jubRutSet.has(r)){matchEnPagina=true;regPag(r,p);}});
       if(matchEnPagina){va_registrarResolucion('Exención Cotizar','gratis');continue;}
       // Nivel 1.5: checksum contra la nómina de jubilados, sin IA
       const rutChecksum=va_extraerRutConChecksum(txt,jubRutSet);
-      if(rutChecksum){va_addRut(ruts,rutChecksum);va_registrarResolucion('Exención Cotizar','gratis');continue;}
+      if(rutChecksum){va_addRut(ruts,rutChecksum);regPag(rutChecksum,p);va_registrarResolucion('Exención Cotizar','gratis');continue;}
       // Nivel 1.75: el RUT de estos formularios AFP a veces viene escrito a
       // mano en casillas separadas ("RUT| |7[1[9") y el OCR lo destroza —
       // pero el NOMBRE suele estar impreso/tipeado cerca y SÍ se lee bien.
@@ -12314,6 +12325,7 @@ async function va_validarExenciones(){
       }
       if(matchPorNombre){
         va_addRut(ruts,matchPorNombre.rutNorm);
+        regPag(matchPorNombre.rutNorm,p);
         va_iaAuditLog.push({modulo:'Exención Cotizar',pagina:p,tipo:'EXENCION_AFP',
           nombreLeido:matchPorNombre.nombre,resultado:'match',atribuidoA:matchPorNombre.nombre,
           motivo:'RUT no reconocible por OCR (manuscrito) — atribuido por nombre en el texto OCR, sin gastar IA'});
@@ -12331,7 +12343,7 @@ async function va_validarExenciones(){
             nombreLeido:leido.nombre,rutLeido:leido.rut||null,resultado:match?'match':'sin_match',
             atribuidoA:match?match.nombre:null,
             motivo:match?null:'nombre leído no coincide con ningún jubilado de la nómina'});
-          if(match){va_addRut(ruts,match.rutNorm);va_registrarResolucion('Exención Cotizar','ia');}
+          if(match){va_addRut(ruts,match.rutNorm);regPag(match.rutNorm,p);va_registrarResolucion('Exención Cotizar','ia');}
           else va_registrarResolucion('Exención Cotizar','sinResolver');
         }else if(leido){
           va_iaAuditLog.push({modulo:'Exención Cotizar',pagina:p,tipo:'EXENCION_AFP',
@@ -12346,6 +12358,8 @@ async function va_validarExenciones(){
   const cubiertos=jubLH.filter(x=>ruts.has(x.rutNorm));
   const faltantes=jubLH.filter(x=>!ruts.has(x.rutNorm));
   va_docResults['exencion']={nombre:'3.5 Exención Cotizar',cargado:true,totalLH:jubLH.length,cubiertos:cubiertos.length,
+    cubiertosDetalle:cubiertos.map(x=>({rut:x.rut,nombre:x.nombre,
+      pagina:(paginasPorRut.get(x.rutNorm)||[]).join(', ')||'—'})),
     faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre})),paginasIA:paginasIA,
     estado:faltantes.length===0?'✅':(faltantes.length<=2?'⚠':'❌')};
   return{cargado:true,ruts};
@@ -14217,7 +14231,8 @@ function va_renderLicencias(){
       if(!tiene){estado='❌';obs='Sin evidencia en el PDF';}
       else if(diasDoc!=null&&diasDoc!==x.diasLic){estado='⚠';obs=`Días no coinciden (LH=${x.diasLic}, doc=${diasDoc})`;}
       else{estado='✅';obs=diasDoc!=null?'Días coinciden':'Encontrada — no se pudo leer días del doc';}
-      return{rut:x.rut,nombre:x.nombre,diasLic:x.diasLic,estado,obs};
+      const pagina=(w&&w.licMedPaginas&&w.licMedPaginas.length)?w.licMedPaginas.join(', '):'—';
+      return{rut:x.rut,nombre:x.nombre,diasLic:x.diasLic,estado,obs,pagina};
     });
     const ok=filas.filter(f=>f.estado==='✅').length;
     const warn=filas.filter(f=>f.estado==='⚠').length;
@@ -14228,9 +14243,9 @@ function va_renderLicencias(){
       <div class="ch-kpi${warn?' warn':''}"><div class="v">${warn}</div><div class="l">Días no coinciden</div></div>
       <div class="ch-kpi${falt?' err':''}"><div class="v">${falt}</div><div class="l">Sin evidencia</div></div>
     </div>`;
-    h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Días LH</th><th>Observación</th></tr></thead><tbody>';
+    h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Días LH</th><th>Pág.</th><th>Observación</th></tr></thead><tbody>';
     filas.sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
-      h+=`<tr><td>${f.estado}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLic}</td><td style="font-size:.72rem">${f.obs}</td></tr>`;
+      h+=`<tr><td>${f.estado}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLic}</td><td style="text-align:center;font-size:.72rem">${f.pagina}</td><td style="font-size:.72rem">${f.obs}</td></tr>`;
     });
     h+='</tbody></table>';
     h+=va_renderIAAuditSection('Licencia Médica (inline)');
@@ -14285,6 +14300,14 @@ function va_renderExencion(){
     [...d.faltantes].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{h+=`<tr><td>${f.rut}</td><td>${f.nombre}</td></tr>`;});
     h+='</tbody></table>';
   }else{h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los jubilados del LH tienen exención</div>';}
+  if((d.cubiertosDetalle||[]).length){
+    h+='<details style="margin-top:10px"><summary style="cursor:pointer;font-size:.78rem;color:#375">Ver dónde se encontró cada uno ('+d.cubiertosDetalle.length+')</summary>';
+    h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th><th>Pág.</th></tr></thead><tbody>';
+    [...d.cubiertosDetalle].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
+      h+=`<tr><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center;font-size:.72rem">${f.pagina}</td></tr>`;
+    });
+    h+='</tbody></table></details>';
+  }
   h+=va_renderIAAuditSection('Exención Cotizar');
   return h;
 }
