@@ -674,6 +674,39 @@ no. Verificado en consola de navegador con datos sintéticos (mismo shape que
 los reales): sin duplicados al registrar la misma página dos veces, columna
 "Pág." y `<details>` renderizan correctamente.
 
+## Motor de decisión determinista: evaluado, descartado por sobre-generalización
+
+Se evaluó portar el patrón `decision/engine.py` de MOTOR VISUAL MULTICAPA
+(cascada pura `findings → PASS/REVIEW/FAIL`) a `va_clasificar()`
+(~línea 12535+), asumiendo que 3 ramas (NUEVO, MENOS_30, OK) repetían el
+mismo ternario `estado = docsFalt.length?'⚠':'✅'`. Al releer el código con
+cuidado ANTES de tocar nada (como pide este mismo proceso), resultó que la
+premisa era falsa:
+
+- **OK** sí tiene el ternario limpio.
+- **NUEVO** arranca en `'⚠'` fijo y solo sube a `'✅'` si no faltan
+  documentos, agregando texto al mensaje en vez de reemplazarlo — nunca
+  llega a `❌`. Parecido, pero no igual.
+- **MENOS_30** no tiene el patrón en absoluto: el estado queda en `'⚠'`
+  fijo siempre, independientemente de si falta el Libro o no — es una
+  decisión de diseño (trabajar <30 días ya es de por sí una advertencia),
+  no un ternario que se pueda generalizar.
+
+Con solo 1 aparición real del patrón (no 3 casi-idénticas), forzar una
+función genérica tipo `va_decidirDoc(findings)` habría requerido un
+config-object con tanta rama como el código actual — no es DRY real, es
+complejidad nueva a cambio de nada, justo el tipo de riesgo que hay que
+evitar al tocar `va_clasificar`. Se decidió NO implementarlo.
+
+**Lección para la próxima vez que se evalúe portar un patrón de MVM (o de
+cualquier otro lado) a este código**: la similitud "a simple vista" entre
+ramas de `va_clasificar` no alcanza para asumir que comparten lógica —
+hay que leer cada rama completa (qué valor por defecto tiene `r.estado`
+ANTES del bloque en cuestión, si el mensaje se reemplaza o se le agrega
+texto, si `❌` es alcanzable o no) antes de diseñar la abstracción. Mismo
+principio que "no arregles adivinando" del resto de este skill, aplicado
+a refactors en vez de a bugs de lectura.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
