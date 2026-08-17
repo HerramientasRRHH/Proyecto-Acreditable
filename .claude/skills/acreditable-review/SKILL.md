@@ -1085,6 +1085,43 @@ decirle esto al usuario explícitamente ANTES de pushear — "esto lo probé
 aislado, no puedo garantizar que se comporte igual en una corrida larga
 real" — en vez de reportarlo como validado sin esa salvedad.
 
+## "Base única" filtraba por sub-área igual que las bases con varios sectores — perdía gente real
+
+El usuario notó que Cruce 2 (Despedidos F30-1 vs Desvinculados LH) mostraba
+10 desvinculados cuando el LH real (`2026-08-17 Libro de haberes...
+2026-07-01.xlsx`) tenía 11 con Fecha Término Trabajo. Confirmado con el
+Excel real: los 10 mostrados tienen `Sub-área = "Antofagasta Ciudad 2022"`,
+el 11° (Torrejón Campusano Felipe Alejandro) tiene
+`Sub-área = "Base Antofagasta AK"` — una etiqueta distinta.
+
+Causa: `va_applySector()` filtraba `va_lhFiltered` por coincidencia EXACTA
+de texto contra la sub-área configurada en `VA_BASES[base].sectores[sec]`
+— sin importar si la base tenía 1 sector configurado ("Base única", como
+Antofagasta y Mejillones) o varios (Lo Barnechea, Vitacura, Las Condes).
+Para bases de varios sectores esto es correcto (cada sector es una
+validación separada de verdad). Para "Base única" es un bug: el nombre ya
+promete "no hay división acá", pero el LH real puede traer varias
+etiquetas de Sub-área internas igual (distintos frentes de trabajo del
+mismo contrato) — y cualquiera que no calzara con el string exacto
+configurado quedaba excluido EN SILENCIO de absolutamente todo el
+validador (no solo del cruce F30-1 donde se notó), sin ningún aviso.
+
+**Fix**: en `va_applySector()`, si la base tiene un solo sector
+configurado (`Object.keys(VA_BASES[base].sectores).length===1`), se usa
+`va_lhAll` completo sin filtrar por sub-área — coincide con lo que "Base
+única" ya debería significar. Bases con varios sectores reales (verificado
+con datos sintéticos que reproducen Lo Barnechea Sector A/C) siguen
+filtrando exactamente igual que antes, sin cambios.
+
+**Alcance real del bug** (verificado contra el LH real completo, no solo
+el caso reportado): de 341 personas totales, 338 en "Antofagasta Ciudad
+2022" y 3 en "Base Antofagasta AK" — el fix agrega esas 3 personas a
+absolutamente todos los módulos de Antofagasta (Liquidaciones, Contratos,
+Mujeres, Jubilados, etc.), no solo al cruce de F30-1 donde se detectó.
+Antes de este fix, esas 3 personas nunca aparecían en NINGÚN resultado de
+Antofagasta, ni como cubiertas ni como faltantes — simplemente no
+existían para el validador.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),

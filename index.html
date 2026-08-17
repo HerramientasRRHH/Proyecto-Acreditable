@@ -11265,10 +11265,24 @@ function va_renderSectores(base){
 }
 function va_applySector(base,sec){
   va_sectorKey=sec;va_subarea=VA_BASES[base].sectores[sec];
-  va_lhFiltered=va_lhAll.filter(x=>x.subarea===va_subarea);
-  if(!va_lhFiltered.length) va_lhFiltered=va_lhAll.filter(x=>x.subarea.includes(va_subarea)||va_subarea.includes(x.subarea));
+  const esBaseUnica=Object.keys(VA_BASES[base].sectores).length===1;
+  if(esBaseUnica){
+    // "Base única" significa que esa base NO se divide en sectores — pero el
+    // LH real puede traer varias etiquetas de Sub-área distintas igual (ej.
+    // Antofagasta real: "Antofagasta Ciudad 2022" y "Base Antofagasta AK"
+    // mezcladas). Filtrar por coincidencia exacta de texto contra una sola
+    // etiqueta configurada excluía en silencio a quien tuviera otra — un
+    // desvinculado real (Fecha Término en el LH) quedaba fuera del cruce
+    // contra F30-1 sin ningún aviso. Si la base es de un solo sector, se usa
+    // TODO el LH tal cual, sin filtrar por sub-área — coincide con lo que el
+    // nombre "Base única" ya prometía.
+    va_lhFiltered=va_lhAll;
+  }else{
+    va_lhFiltered=va_lhAll.filter(x=>x.subarea===va_subarea);
+    if(!va_lhFiltered.length) va_lhFiltered=va_lhAll.filter(x=>x.subarea.includes(va_subarea)||va_subarea.includes(x.subarea));
+  }
   const info=document.getElementById('va-sector-info');info.style.display='block';
-  info.textContent=`✅ ${va_lhFiltered.length} trabajadores en ${va_subarea} (${va_lhFiltered.filter(x=>x.imp>0).length} activos)`;
+  info.textContent=`✅ ${va_lhFiltered.length} trabajadores en ${esBaseUnica?base:va_subarea} (${va_lhFiltered.filter(x=>x.imp>0).length} activos)`;
   va_renderDocSlots(base);document.getElementById('va-card-docs').style.display='';document.getElementById('va-card-exec').style.display='';
 }
 
