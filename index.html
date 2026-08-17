@@ -13192,13 +13192,25 @@ async function va_validarLibroAsist(){
   // depende del orden de los demás para leerse bien). El código de adentro
   // (por página) queda IDÉNTICO al de antes, solo que ahora corre dentro de
   // esta función por-archivo en vez de directo en el for de arriba.
+  // Contador de archivos EN CURSO al mismo tiempo — puramente diagnóstico
+  // (no cambia ningún resultado), agregado porque la barra de progreso de
+  // abajo antes solo mostraba un número de página compartido entre todos
+  // los archivos, sin ninguna señal visible de que hubiera varios workers
+  // procesando en simultáneo. Ver consola del navegador para confirmar
+  // paralelismo real: si el pool funciona, deberían verse varios
+  // "archivo N iniciado" con "en curso" > 1 antes de que termine el primero.
+  let archivosLibroEnCurso=0,archivosLibroIniciados=0;
   async function procesarArchivoLibro(buf,worker){
     const ren_ocrWorker=worker; // shadow local: todo el bloque de abajo usa el worker que le tocó a ESTE archivo
+    archivosLibroIniciados++;archivosLibroEnCurso++;
+    const miArchivoNum=archivosLibroIniciados;
+    console.log(`[Libro Antofagasta] archivo ${miArchivoNum} iniciado — ${archivosLibroEnCurso} en curso simultáneamente`);
+    try{
     let pdf;
     try{pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;}catch(e){console.warn('Libro Antofagasta: PDF inválido',e);return;}
     for(let p=1;p<=pdf.numPages;p++){
       totalPags++;
-      if(totalPags%10===0) va_setProg(Math.min(86+Math.round(totalPags/10),89),`📅 Libro Asistencia: pág ${totalPags}`);
+      if(totalPags%10===0) va_setProg(Math.min(86+Math.round(totalPags/10),89),`📅 Libro Asistencia: pág ${totalPags} (${archivosLibroEnCurso} archivos en paralelo)`);
       let nombreLeido=null,fuente=null,matchWorker=null;
       try{
         const page=await pdf.getPage(p);
@@ -13255,6 +13267,10 @@ async function va_validarLibroAsist(){
           nombreLeido,resultado:nombreLeido?'sin_match':'sin_lectura',atribuidoA:null,
           motivo:nombreLeido?'nombre leído no coincide con nadie de la nómina':'ni OCR ni IA lograron leer un nombre en la página'});
       }
+    }
+    }finally{
+      archivosLibroEnCurso--;
+      console.log(`[Libro Antofagasta] archivo ${miArchivoNum} terminado — quedan ${archivosLibroEnCurso} en curso`);
     }
   }
   va_setProg(86,'⏳ Cargando OCR (paralelo)…');
