@@ -12113,7 +12113,17 @@ async function va_validarFiniquitos(){
   const tipoPorRut=new Map(); // rutNorm -> 'Vale Vista' | 'Carta empresa' | ... (para el detalle)
   const cartaPendienteRuts=new Set();
   for(const buf of dd.buffers){
-    const txt=await va_getPdfTextOCR(buf);
+    // OJO: va_getPdfTextOCR(buf,maxPagesOCR) NO hace OCR "de las primeras N
+    // páginas" — si el PDF completo tiene MÁS páginas que maxPagesOCR, se
+    // salta el OCR de TODO el archivo (mismo bug ya encontrado y arreglado
+    // en Jubilados y F30-1/PreviRed esta sesión). Acá llamaba a
+    // va_getPdfTextOCR(buf) sin segundo argumento → tope por defecto de 30 —
+    // un Finiquitos.pdf real de Antofagasta puede tener más páginas que eso
+    // (varias por trabajador: finiquito + respaldo). Se sube el tope por el
+    // mismo motivo, aunque no se pudo confirmar el conteo exacto de páginas
+    // del archivo real (dos lectores de PDF distintos dieron números
+    // distintos) — subir el tope es de bajo riesgo en cualquier caso.
+    const txt=await va_getPdfTextOCR(buf,100);
     va_findAllRuts(txt).forEach(r=>va_addRut(ruts,r));
     if(VA_CARTA_FINIQ_PENDIENTE_RE.test(txt)){
       va_findAllRuts(txt).forEach(r=>cartaPendienteRuts.add(r));

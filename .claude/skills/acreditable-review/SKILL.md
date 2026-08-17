@@ -1217,6 +1217,35 @@ sub-área. La paralelización de `va_validarLiquidaciones` (commit
 por separado (causó 2 corridas reales colgadas — ver sección
 correspondiente arriba).
 
+## Finiquitos: mismo bug de tope de páginas que Jubilados y F30-1, tercera vez en el día
+
+El usuario insistió en que Finiquitos seguía sin leer nada (0/11) incluso
+después de una corrida fresca — descartando la hipótesis inicial de
+"corrida vieja en pantalla". `va_validarFiniquitos` llamaba a
+`va_getPdfTextOCR(buf)` **sin segundo argumento**, es decir con el tope
+por defecto de 30 páginas — el mismo bug ya encontrado y arreglado en
+Jubilados y F30-1/PreviRed esta sesión ("si el PDF completo tiene MÁS
+páginas que maxPagesOCR, se salta el OCR de TODO el archivo, no de las
+páginas de más"). Se subió a `,100`, mismo criterio que los otros dos.
+
+**No se pudo confirmar el conteo exacto de páginas del archivo real** —
+dos lectores de PDF (PyMuPDF y pypdf) coincidieron en 23 páginas para
+`Finiquitos.pdf`, pero el conteo que se había visto antes para ese mismo
+archivo decía 52 (y el mismo patrón de discrepancia ~2x apareció también
+con `Contratos de trabajos.pdf`: 132 vs 53 páginas según distintas
+herramientas). No se investigó a fondo el porqué de esta discrepancia
+(hipótesis sin confirmar: páginas escaneadas como "spread" que algún
+lector cuenta como 2 páginas lógicas) — se optó por subir el tope de
+todas formas porque es de bajo riesgo y ya se demostró necesario 2 veces
+antes en esta misma sesión con el mismo síntoma exacto.
+
+**Patrón para la próxima vez**: si un módulo de Antofagasta reporta "no
+lee nada" y el documento se ve legible a simple vista (no rotado, no
+manuscrito), lo primero a revisar es si su llamado a `va_getPdfTextOCR`
+tiene un tope de páginas explícito y suficientemente alto — no asumir que
+es un problema de calidad de OCR sin antes descartar esto, que ya salió 3
+veces en un solo día.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
