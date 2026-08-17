@@ -973,6 +973,30 @@ Liquidaciones, o (b) medirlo de verdad en un navegador real con datos
 reales — ninguna de las dos se hizo la primera vez, y las dos corridas
 reales colgadas de este mismo día son la evidencia de por qué hacía falta.
 
+## va_getPdfText (sin OCR) vs va_getPdfTextOCR — no todos los módulos usaban la que tiene fallback
+
+El usuario reportó F30-1 "no lo lee por ser un escáner". Causa: `va_validarCruceDoc`
+(usada por F30-1 y PreviRed) llamaba a `va_getPdfText(buf)` — una función
+que SOLO extrae texto nativo embebido, sin ningún intento de OCR — a
+diferencia de la inmensa mayoría de los módulos, que usan
+`va_getPdfTextOCR` (con fallback de OCR si hay poco texto). Un F30-1
+escaneado (0 texto nativo) daba 0 RUT siempre, sin ningún aviso — el mismo
+patrón de "hueco de wiring, no de calidad de OCR/IA" que ya se documentó
+varias veces en este Skill.
+
+**Fix**: `va_validarCruceDoc` (F30-1, PreviRed) y su carta explicativa
+(`f301carta`) pasaron de `va_getPdfText` a `va_getPdfTextOCR` — mismo
+patrón ya probado y seguro de Mujeres/Discapacidad, **sin** `intentarRotacion`
+(no hay evidencia de que estos documentos vengan de costado, y después del
+incidente de hoy no se prende ese parámetro sin evidencia real). Tope de
+100 páginas (cubre PreviRed, hasta 73 páginas reales) para el documento
+principal, 30 para la carta explicativa (documento corto).
+
+**Sigue pendiente, mismo hueco, no tocado todavía**: `va_validarGenerico`
+(línea ~12530, usado para cualquier `docId` sin validador dedicado) también
+usa `va_getPdfText` sin OCR — si algún día un documento que cae en el sweep
+genérico reporta "no lo lee" y es un escaneo, es la misma causa.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),

@@ -12442,7 +12442,13 @@ async function va_validarCruceDoc(docId,nombre){
   const ruts=new Set();
   let textoCompleto='';
   for(const buf of dd.buffers){
-    const txt=await va_getPdfText(buf);
+    // Antes usaba va_getPdfText (SOLO texto nativo, sin OCR) — un F30-1 o
+    // PreviRed escaneado daba 0 RUT siempre, sin ningún aviso. Cambiado a
+    // va_getPdfTextOCR con el mismo patrón ya probado en Mujeres/Discapacidad
+    // (sin intentarRotacion — no confirmado que estos documentos vengan de
+    // costado, y ya aprendimos hoy a no prenderlo sin evidencia real). Tope
+    // de 100 páginas cubre PreviRed (hasta 73 páginas reales) y F30-1 (~11).
+    const txt=await va_getPdfTextOCR(buf,100);
     textoCompleto+=txt;
     va_findAllRuts(txt).forEach(r=>ruts.add(r));
   }
@@ -12481,7 +12487,7 @@ async function va_validarCruceDoc(docId,nombre){
     const cartaDD=va_docsData['f301carta'];
     if(cartaDD&&cartaDD.buffers&&cartaDD.buffers.length>0){
       for(const buf of cartaDD.buffers){
-        va_findAllRuts(await va_getPdfText(buf)).forEach(r=>cartaRuts.add(r));
+        va_findAllRuts(await va_getPdfTextOCR(buf,30)).forEach(r=>cartaRuts.add(r));
       }
     }
     const faltEnCarta=faltanEnNomina.filter(x=>cartaRuts.has(x.rutNorm));
