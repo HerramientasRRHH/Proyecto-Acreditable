@@ -13242,7 +13242,58 @@ async function va_validarLibroRem(){
   var dd=va_docsData['librorem'];
   if(!dd||!dd.buffers||!dd.buffers.length){va_docResults['librorem']={nombre:'Libro Remuneraciones',cargado:false,estado:'—'};return;}
   var ruts=new Set();
-  for(var b of dd.buffers){va_findAllRuts(await va_getPdfTextOCR(b,20)).forEach(function(r){ruts.add(r);});}
+  if(!ren_ocrWorker) await cargarOCR();
+  for(var b of dd.buffers){
+    var pdfDocLR=await pdfjsLib.getDocument({data:b.slice(0)}).promise;
+    for(var pLR=1;pLR<=pdfDocLR.numPages&&pLR<=20;pLR++){
+      var pgLR=await pdfDocLR.getPage(pLR);
+      var tcLR=await pgLR.getTextContent();
+      var txtNativoLR=(tcLR.items||[]).map(function(it){return it.str;}).join(' ');
+      if(txtNativoLR.replace(/\s/g,'').length>=40){
+        va_findAllRuts(txtNativoLR).forEach(function(r){ruts.add(r);});
+        continue;
+      }
+      if(!ren_ocrWorker) continue;
+      // El Libro de Remuneraciones real de Antofagasta viene escaneado con
+      // orientación MEZCLADA página por página (confirmado con el archivo
+      // real: pág 1 a 90°, pág 4 a 180°, pág 6 a 90°, etc — no una sola
+      // rotación fija para todo el archivo). Un OCR a la rotación equivocada
+      // igual produce miles de caracteres reconocibles como "texto" (basura,
+      // pero no vacío), así que el reintento de rotación compartido
+      // (va_getPdfTextOCR con intentarRotacion) nunca se disparaba — su gate
+      // es "¿salió poco texto?", y acá siempre sale mucho texto, solo que
+      // ilegible. Se prueban las 4 rotaciones siempre para esta página y se
+      // queda con la que encuentra MÁS RUT con dígito verificador válido —
+      // señal muchísimo más confiable que "cuántos caracteres salieron" para
+      // una tabla de RUT. Validado con el archivo real: 0% → 66.3% de
+      // cobertura contra la nómina completa.
+      var vpLR=pgLR.getViewport({scale:2.5});
+      var baseCanvasLR=document.createElement('canvas');
+      baseCanvasLR.width=vpLR.width;baseCanvasLR.height=vpLR.height;
+      await pgLR.render({canvasContext:baseCanvasLR.getContext('2d'),viewport:vpLR}).promise;
+      var mejorRutsLR=new Set(),mejorCantLR=-1;
+      for(var angLR of [0,90,180,270]){
+        try{
+          var cvLR=baseCanvasLR;
+          if(angLR!==0){
+            cvLR=document.createElement('canvas');
+            if(angLR===90){cvLR.width=baseCanvasLR.height;cvLR.height=baseCanvasLR.width;
+              var rc90=cvLR.getContext('2d');rc90.translate(cvLR.width,0);rc90.rotate(Math.PI/2);rc90.drawImage(baseCanvasLR,0,0);}
+            else if(angLR===180){cvLR.width=baseCanvasLR.width;cvLR.height=baseCanvasLR.height;
+              var rc180=cvLR.getContext('2d');rc180.translate(cvLR.width,cvLR.height);rc180.rotate(Math.PI);rc180.drawImage(baseCanvasLR,0,0);}
+            else{cvLR.width=baseCanvasLR.height;cvLR.height=baseCanvasLR.width;
+              var rc270=cvLR.getContext('2d');rc270.translate(0,cvLR.height);rc270.rotate(-Math.PI/2);rc270.drawImage(baseCanvasLR,0,0);}
+          }
+          var blobLR=await new Promise(function(res){cvLR.toBlob(res,'image/png');});
+          var resLR=await ren_ocrWorker.recognize(blobLR);
+          var txtLR=(resLR&&resLR.data&&resLR.data.text)||'';
+          var rutsAngLR=va_findAllRuts(txtLR);
+          if(rutsAngLR.size>mejorCantLR){mejorCantLR=rutsAngLR.size;mejorRutsLR=rutsAngLR;}
+        }catch(eLR){console.warn('LibroRem OCR rotación',angLR,eLR);}
+      }
+      mejorRutsLR.forEach(function(r){ruts.add(r);});
+    }
+  }
   dd.rutsFound=ruts;
   var todosLH=va_lhFiltered;
   var todosRuts=new Set(todosLH.map(function(x){return x.rutNorm;}));
