@@ -12448,11 +12448,14 @@ async function va_validarCruceDoc(docId,nombre){
     // (sin intentarRotacion — no confirmado que estos documentos vengan de
     // costado, y ya aprendimos hoy a no prenderlo sin evidencia real). Tope
     // de 100 páginas cubre PreviRed (hasta 73 páginas reales) y F30-1 (~11).
-    // psm:'4' — probado contra el F30-1 real de Antofagasta con Tesseract.js
-    // real: el modo automático se pierde en la tabla densa de RUT+nombre
-    // (1 RUT de 46 encontrados en una página); con psm 4 lee la tabla
-    // completa. Ver skill acreditable-review para el detalle de la prueba.
-    const txt=await va_getPdfTextOCR(buf,100,false,'4');
+    // NOTA: se probó psm:'4' (mejoraba mucho en pruebas aisladas: 46 vs 1
+    // RUT) pero en la corrida REAL del usuario dio PEOR resultado que sin
+    // psm (0 en vez de 4) — no se pudo reproducir el porqué en este sandbox
+    // (no se puede correr un pipeline completo largo con PDFs reales para
+    // ver si el worker se comporta distinto después de mucho uso previo).
+    // Revertido a la versión sin psm mientras se investiga con más cuidado
+    // — ver skill acreditable-review.
+    const txt=await va_getPdfTextOCR(buf,100);
     textoCompleto+=txt;
     va_findAllRuts(txt).forEach(r=>ruts.add(r));
   }

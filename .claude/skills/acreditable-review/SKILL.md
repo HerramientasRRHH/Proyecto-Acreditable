@@ -1051,6 +1051,40 @@ vista es legible y no está rotado, antes de asumir que hace falta IA
 `ren_ocrWorker` real — es gratis, es una sola línea, y en este caso fue
 la diferencia entre 1 y 46 RUT en la misma página exacta.
 
+## PSM 4 revertido: mejoraba en pruebas aisladas, empeoró en la corrida real
+
+El fix de PSM de la sección anterior (`psm:'4'` para tablas densas) se
+probó de punta a punta contra el `ren_ocrWorker` real con la imagen real
+del F30-1 (46/46 RUT) — pero en la corrida REAL del usuario, con el fix ya
+desplegado, el resultado fue PEOR que antes de agregarlo: 0 RUT
+encontrados (antes, sin PSM, ya encontraba 4). Revertido de inmediato
+(vuelta a `va_getPdfTextOCR(buf,100)` sin el 4° parámetro) — no se
+esperó a entender la causa antes de revertir, dado el patrón repetido hoy
+de cambios que se ven bien en una prueba aislada pero fallan en la corrida
+real completa.
+
+**Por qué la prueba aislada no alcanzó a predecir esto**: la prueba
+usó un `ren_ocrWorker` recién cargado (`cargarOCR()` en una página en
+blanco, sin nada más corriendo). En la corrida real, ese mismo worker ya
+viene de procesar cientos de páginas (Liquidaciones, Finiquitos,
+Licencias) antes de llegar a F30-1 — es la hipótesis más probable (no
+confirmada) de por qué `setParameters` o el `recognize` posterior se
+comportó distinto: algo relacionado al estado acumulado de un worker de
+Tesseract después de mucho uso en la misma sesión, no reproducible en una
+prueba aislada de una sola página. **No se pudo confirmar la causa real**
+porque este sandbox no permite correr un pipeline completo con PDFs
+reales de principio a fin.
+
+**Lección, más fuerte todavía después de este caso**: una prueba aislada
+(worker fresco, una sola página) que sale perfecta NO garantiza el mismo
+resultado dentro de una corrida real larga, donde el worker compartido ya
+acumuló uso. Para cualquier cambio futuro que toque `ren_ocrWorker`
+(parámetros, estado, lo que sea) y se vaya a activar en un módulo que
+corre DESPUÉS de otros módulos pesados en el mismo pipeline, hay que
+decirle esto al usuario explícitamente ANTES de pushear — "esto lo probé
+aislado, no puedo garantizar que se comporte igual en una corrida larga
+real" — en vez de reportarlo como validado sin esa salvedad.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
