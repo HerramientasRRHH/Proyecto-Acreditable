@@ -12448,7 +12448,11 @@ async function va_validarCruceDoc(docId,nombre){
     // (sin intentarRotacion — no confirmado que estos documentos vengan de
     // costado, y ya aprendimos hoy a no prenderlo sin evidencia real). Tope
     // de 100 páginas cubre PreviRed (hasta 73 páginas reales) y F30-1 (~11).
-    const txt=await va_getPdfTextOCR(buf,100);
+    // psm:'4' — probado contra el F30-1 real de Antofagasta con Tesseract.js
+    // real: el modo automático se pierde en la tabla densa de RUT+nombre
+    // (1 RUT de 46 encontrados en una página); con psm 4 lee la tabla
+    // completa. Ver skill acreditable-review para el detalle de la prueba.
+    const txt=await va_getPdfTextOCR(buf,100,false,'4');
     textoCompleto+=txt;
     va_findAllRuts(txt).forEach(r=>ruts.add(r));
   }
@@ -12683,7 +12687,20 @@ function va_clasificar(t,liq){
 // apagado por defecto; solo lo activan los llamadores que ya confirmaron
 // (con datos reales) que su documento es chico y el costo es acotado —
 // ver skill acreditable-review.
-async function va_getPdfTextOCR(buf,maxPagesOCR,intentarRotacion){
+// psm: OPT-IN, default undefined (Tesseract usa su modo automático de
+// siempre). Encontrado con el F30-1 real de Antofagasta: en tablas densas
+// de RUT+nombre (filas finas, muchas por página) el modo automático de
+// Tesseract se confunde con las líneas divisorias y lee 1 fila de cada
+// ~45 (probado con Tesseract.js real: 119 caracteres de una página que
+// tiene ~2000). `tessedit_pageseg_mode:'4'` ("una sola columna de texto de
+// tamaño variable") arregla esto — mismo caso probado, mismo Tesseract.js
+// real: pasó de 1 RUT a 46. Cuesta ~4-5x más tiempo por página (~12s vs
+// ~3s en la prueba), por eso NO es el modo por defecto — hay documentos
+// (formularios, texto corrido) donde el modo automático ya funciona bien y
+// no vale la pena pagar ese costo. Siempre se restaura a '3' (default de
+// Tesseract) después de cada página, para no afectar otros módulos que
+// comparten el mismo ren_ocrWorker.
+async function va_getPdfTextOCR(buf,maxPagesOCR,intentarRotacion,psm){
   maxPagesOCR=maxPagesOCR||30;
   var doc=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
   var total=doc.numPages;var allText='';
@@ -12699,7 +12716,10 @@ async function va_getPdfTextOCR(buf,maxPagesOCR,intentarRotacion){
         var cv=document.createElement('canvas');cv.width=vp.width;cv.height=vp.height;
         await pg.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
         var blob=await new Promise(function(res){cv.toBlob(res,'image/png');});
-        var result=await ren_ocrWorker.recognize(blob);
+        if(psm) await ren_ocrWorker.setParameters({tessedit_pageseg_mode:psm});
+        var result;
+        try{result=await ren_ocrWorker.recognize(blob);}
+        finally{if(psm) await ren_ocrWorker.setParameters({tessedit_pageseg_mode:'3'});}
         if(result&&result.data&&result.data.text) txt=result.data.text;
       }catch(e){console.warn('OCR failed page',p,e);}
       if(intentarRotacion&&txt.replace(/\s/g,'').length<40&&ren_ocrWorker){

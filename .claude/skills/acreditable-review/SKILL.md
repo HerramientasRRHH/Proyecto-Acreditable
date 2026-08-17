@@ -997,6 +997,60 @@ principal, 30 para la carta explicativa (documento corto).
 usa `va_getPdfText` sin OCR — si algún día un documento que cae en el sweep
 genérico reporta "no lo lee" y es un escaneo, es la misma causa.
 
+## Tesseract se pierde en tablas densas — el modo de segmentación de página (PSM) importa
+
+Después de conectar OCR a F30-1/PreviRed (sección anterior), el usuario
+probó con el F30-1 real de Antofagasta y siguió fallando (4 RUT de 329,
+1.2%) — CON el fix ya desplegado y confirmado. Se investigó con el
+archivo real (`B:\Antofagasta\...\F).-F30-1\F 30-1.pdf`, 11 páginas, 100%
+escaneado — visualmente limpio, no manuscrito, no rotado).
+
+Primero se confirmó que el documento SÍ es legible (PaddleOCR, vía el
+entorno de MOTOR VISUAL MULTICAPA: 95-100% de confianza en la tabla de
+trabajadores). El problema apareció al probar con **Tesseract.js real**
+(el motor que usa la app, cargado en el navegador vía `cargarOCR()`/
+`ren_ocrWorker`, contra la MISMA imagen pre-renderizada a la escala real
+de `va_getPdfTextOCR`, scale 2.5): de una página con ~2000 caracteres
+útiles, Tesseract en su modo automático (`tessedit_pageseg_mode` default,
+PSM 3) solo devolvía **119 caracteres** — leía bien la primera fila de la
+tabla ("32 26.378.694-7 Luz Estela Arias Gallo") y después se perdía por
+completo, confundido por las líneas divisorias finas de una tabla con
+muchas filas por página.
+
+**Diagnóstico**: no es un problema de calidad de imagen ni de rotación —
+es que el modo de segmentación AUTOMÁTICO de Tesseract (que decide solo
+cómo dividir la página en bloques de texto) falla específicamente con
+tablas densas de filas finas. Probado directo contra `ren_ocrWorker` real
+con `setParameters({tessedit_pageseg_mode:...})`:
+- PSM 3 (automático, default): 1 RUT encontrado, 119 caracteres.
+- PSM 6 (bloque uniforme de texto): igual que el default, sin mejora.
+- **PSM 4 (columna única de texto de tamaño variable): 46 RUT
+  encontrados, 2011 caracteres — la tabla completa.**
+
+También se confirmó que PSM 4 NO rompe páginas que no son tablas (probado
+contra la portada del mismo certificado, con logo/texto suelto — sigue
+leyendo bien, 1570 caracteres, encuentra los 2 RUT reales de esa página).
+
+**Fix**: nuevo parámetro opcional `psm` en `va_getPdfTextOCR(buf,maxPagesOCR,
+intentarRotacion,psm)` — si se pasa, se aplica con `setParameters` ANTES
+del `recognize()` y se restaura a `'3'` (default) en un `finally`, para no
+dejar el `ren_ocrWorker` compartido en un modo raro que afecte a otros
+módulos que corran después en la misma sesión (mismo tipo de cuidado que
+ya costó caro hoy con el pool de Liquidaciones). Solo `va_validarCruceDoc`
+(F30-1/PreviRed) lo activa (`psm:'4'`) — es el único caso confirmado con
+datos reales; no se generalizó a otros módulos sin evidencia.
+
+**Costo**: ~4-5x más lento por página con PSM 4 (~12-14s vs ~3s en la
+prueba real) — aceptable para un certificado de ~11 páginas, cada OCR de
+más solo se paga si la página ya tenía poco texto nativo (el 99% de las
+veces con texto nativo, esto ni se ejecuta).
+
+**Lección**: cuando Tesseract "no lee nada" en un documento que a simple
+vista es legible y no está rotado, antes de asumir que hace falta IA
+(pagada) probá primero variar `tessedit_pageseg_mode` contra el
+`ren_ocrWorker` real — es gratis, es una sola línea, y en este caso fue
+la diferencia entre 1 y 46 RUT en la misma página exacta.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
