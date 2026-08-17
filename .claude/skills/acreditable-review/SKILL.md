@@ -1122,6 +1122,62 @@ Antes de este fix, esas 3 personas nunca aparecían en NINGÚN resultado de
 Antofagasta, ni como cubiertas ni como faltantes — simplemente no
 existían para el validador.
 
+## Contratos Antofagasta asumía "un archivo = un trabajador" — no soportaba archivos agrupados
+
+El usuario reportó "0/9 firmado completo" en Contratos, con los 9 nuevos
+del período mostrando "❌ Sin archivo de contrato" — y adjuntó los
+archivos reales que estaba subiendo: `Contratos de trabajos.pdf` (53
+páginas) junto con dos "Listado ingresos..." que no son contratos.
+
+Causa confirmada con el archivo real: `va_validarContratosAntofagasta`
+identificaba al trabajador de un archivo por su NOMBRE DE ARCHIVO
+(`va_matchNombreNomina(nombreArchivo, nuevosLH)`) y descartaba el archivo
+ENTERO (`if(!worker)return;`) si no matcheaba — funciona bien cuando cada
+trabajador tiene su propio PDF ("Contrato de trabajo de Juan Perez.pdf"),
+pero `Contratos de trabajos.pdf` es UN SOLO archivo con los contratos de
+~9 trabajadores distintos seguidos (~6 páginas cada uno: Contrato + Anexo
+Cargo + Anexo HHEE) — su nombre de archivo no matchea a nadie, así que el
+archivo se ignoraba completo sin mirar ni una página, aunque el contenido
+fuera perfectamente legible (confirmado con Tesseract.js real: la primera
+página del archivo es el contrato real de "Marcelina Aguirre Limachi",
+RUT 29.088.873-5 leído correctamente).
+
+**Fix**: se generalizó `procesarArchivoContrato` para detectar al
+trabajador LEYENDO el contenido de cada página con título nueva
+(`va_detectarWorkerEnTituloContrato`, nueva función: RUT primero vía
+`va_findAllRuts`, nombre como respaldo vía el patrón "Don (ña) NOMBRE, de
+nacionalidad"), no solo por el nombre del archivo. El nombre de archivo
+sigue siendo la SEMILLA inicial (`worker` puede arrancar ya asignado) —
+si el archivo es de un solo trabajador y la lectura de contenido falla en
+alguna página, se sigue usando esa semilla sin romper nada (mismo
+comportamiento de siempre). Si en cambio una página titulada nueva trae
+el RUT de OTRO trabajador de la nómina, se cierra la cuenta del anterior
+(`finalizarWorkerActual()`, la misma lógica de faltantes/incompletos que
+antes corría una sola vez al final, ahora reutilizable) y arranca el
+siguiente — permitiendo que un archivo agrupado procese a TODOS sus
+trabajadores, no solo el primero.
+
+Validado: (a) con OCR real (Tesseract.js) contra la página real del
+archivo agrupado, `va_detectarWorkerEnTituloContrato` identifica
+correctamente a la trabajadora por su RUT; (b) simulación completa del
+loop de páginas con 2 trabajadores seguidos (uno incompleto, uno
+completo) — cierra las cuentas en el momento correcto; (c) simulación del
+caso de un solo trabajador por archivo con la detección por contenido
+fallando en TODAS las páginas — sigue funcionando igual que antes gracias
+a la semilla del nombre de archivo, sin regresión.
+
+**Nota sobre Finiquitos, mismo reporte del usuario**: se sospechó al
+principio que era el mismo bug, pero `va_validarFiniquitos` NO identifica
+por nombre de archivo — busca RUTs en el texto completo del PDF
+directamente. Probado con Tesseract.js real contra la página real del
+Finiquito de uno de los reportados como "faltante": se lee perfecto (RUT
+correcto, frase "Finiquito al contrato de trabajo" detectada). No se
+encontró una causa de código — probablemente una corrida vieja/parcial
+vista en pantalla en medio de los otros incidentes del día. Si vuelve a
+reportarse después de una corrida fresca, investigar de nuevo con datos
+reales, no asumir que es el mismo bug de Contratos solo por la
+coincidencia de síntomas.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),

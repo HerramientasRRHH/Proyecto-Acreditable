@@ -13016,6 +13016,25 @@ function va_clasificarTituloContrato(txt){
   if(/CONTRATO\s+DE\s+TRABAJO/i.test(txt))return'CONTRATO';
   return null;
 }
+// A quién pertenece una página TITULADA de Contrato/Anexo — necesario para
+// archivos que agrupan los contratos de VARIOS trabajadores en un solo PDF
+// (confirmado con un archivo real de Antofagasta: "Contratos de trabajos.pdf",
+// 53 páginas, ~9 contratos distintos seguidos) en vez de un archivo por
+// persona. RUT primero (más confiable, aparece siempre como "...Rut,
+// NN.NNN.NNN-N se acuerda..." o "cédula nacional de identidad N°
+// NN.NNN.NNN-N"), nombre como respaldo si el RUT no se pudo leer.
+function va_detectarWorkerEnTituloContrato(txt,listaWorkers){
+  for(const r of va_findAllRuts(txt)){
+    const w=listaWorkers.find(x=>x.rutNorm===r);
+    if(w)return w;
+  }
+  const m=txt.match(/[Dd]on\s*\(?[ñn]?a?\)?\s*([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ\s]+?),\s*de\s*nacionalidad/);
+  if(m){
+    const match=va_matchNombreNomina(m[1].trim(),listaWorkers);
+    if(match)return match;
+  }
+  return null;
+}
 // Firma FÍSICA (mancha de tinta) buscada por la posición de la ÚLTIMA
 // aparición de la etiqueta impresa en la página ("TRABAJADOR" / "EMPLEADOR"
 // o el nombre de la empresa) — la firma/timbre se dibuja arriba de esa
@@ -13079,11 +13098,39 @@ async function va_validarContratosAntofagasta(){
     const ren_ocrWorker=ocrW; // shadow local: todo el bloque de abajo usa el worker que le tocó a ESTE archivo
     const buf=item.buf,fname=item.fname;
     const nombreArchivo=fname.replace(/\.pdf$/i,'').replace(/^Contrato\s+de\s+[Tt]rabajo\s+(de\s+)?/i,'').trim();
-    if(!nombreArchivo)return;
-    const worker=va_matchNombreNomina(nombreArchivo,nuevosLH);
-    if(!worker)return; // no matchea con ningún nuevo ingreso del período — no es un caso a exigir acá
-    const docs={};
-    VA_CONTRATO_TIPOS.forEach(t=>docs[t]={presente:false,firmaTrab:false,firmaEmp:false});
+    // "worker" (el trabajador de la nómina al que pertenecen las páginas
+    // actuales) YA NO es fijo por archivo — antes se decidía UNA vez por el
+    // nombre del archivo y se descartaba el archivo entero si no matcheaba
+    // (bug real encontrado: un archivo real de Antofagasta,
+    // "Contratos de trabajos.pdf", 53 páginas, junta los contratos de ~9
+    // trabajadores distintos seguidos — su nombre de archivo no matchea a
+    // nadie y el archivo entero se ignoraba, sin mirar ni una página). Ahora
+    // el nombre de archivo es solo una semilla inicial (puede ser null); el
+    // worker real se detecta/confirma leyendo el RUT en cada página con
+    // título nueva (va_detectarWorkerEnTituloContrato) — así funciona tanto
+    // con un archivo por trabajador (caso ya validado, sin cambios de
+    // comportamiento) como con un archivo que agrupa varios.
+    let worker=nombreArchivo?va_matchNombreNomina(nombreArchivo,nuevosLH):null;
+    let docs=null;
+    const nuevosDocs=()=>{const d={};VA_CONTRATO_TIPOS.forEach(t=>d[t]={presente:false,firmaTrab:false,firmaEmp:false});return d;};
+    docs=nuevosDocs();
+    // Cierra la cuenta del worker ACTUAL (si hay uno) antes de pasar a otro,
+    // o al terminar el archivo — mismo cálculo que antes hacía una sola vez
+    // al final, ahora reutilizable por cada trabajador del archivo.
+    function finalizarWorkerActual(){
+      if(!worker)return;
+      const faltantesDoc=VA_CONTRATO_TIPOS.filter(t=>!docs[t].presente);
+      const incompletosDoc=VA_CONTRATO_TIPOS.filter(t=>docs[t].presente&&!(docs[t].firmaTrab&&docs[t].firmaEmp));
+      if(!faltantesDoc.length&&!incompletosDoc.length){
+        cubiertosSet.add(worker.rutNorm);
+      }else{
+        const detalles=[
+          ...faltantesDoc.map(t=>`falta ${t}`),
+          ...incompletosDoc.map(t=>`${t} sin firma de ${!docs[t].firmaTrab&&!docs[t].firmaEmp?'ambas partes':(!docs[t].firmaTrab?'trabajador':'empleador')}`)
+        ];
+        incompletos.push({rut:worker.rut,nombre:worker.nombre,falta:detalles.join(' · ')});
+      }
+    }
     let tipoActual=null;
     try{
       const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
@@ -13105,8 +13152,21 @@ async function va_validarContratosAntofagasta(){
         // páginas de firma/continuación heredan el tipo de la última página
         // titulada (mismo patrón que enContratoHasta en Lo Barnechea).
         const tipoPagina=va_clasificarTituloContrato(ocrText);
-        if(tipoPagina)tipoActual=tipoPagina;
-        if(!tipoActual)continue;
+        if(tipoPagina){
+          // Página titulada: puede ser el siguiente documento del MISMO
+          // trabajador (Contrato → Anexo Cargo → Anexo HHEE) o el inicio del
+          // contrato de OTRO trabajador (archivo agrupado). Se lee el RUT/
+          // nombre de ESTA página para decidir — si es alguien distinto al
+          // worker actual, se cierra su cuenta y arranca una nueva.
+          const detectado=va_detectarWorkerEnTituloContrato(ocrText,nuevosLH);
+          if(detectado&&(!worker||detectado.rutNorm!==worker.rutNorm)){
+            finalizarWorkerActual();
+            worker=detectado;
+            docs=nuevosDocs();
+          }
+          tipoActual=tipoPagina;
+        }
+        if(!tipoActual||!worker)continue;
         docs[tipoActual].presente=true;
         // 1) Firma QR/electrónica (texto)
         let firmantes=[...ocrText.matchAll(NOMBRE_RE)].map(m=>m[1].trim()).filter(Boolean);
@@ -13156,17 +13216,7 @@ async function va_validarContratosAntofagasta(){
         }
       }
     }catch(fileErr){console.warn('Contrato Antofagasta '+fname,fileErr);}
-    const faltantesDoc=VA_CONTRATO_TIPOS.filter(t=>!docs[t].presente);
-    const incompletosDoc=VA_CONTRATO_TIPOS.filter(t=>docs[t].presente&&!(docs[t].firmaTrab&&docs[t].firmaEmp));
-    if(!faltantesDoc.length&&!incompletosDoc.length){
-      cubiertosSet.add(worker.rutNorm);
-    }else{
-      const detalles=[
-        ...faltantesDoc.map(t=>`falta ${t}`),
-        ...incompletosDoc.map(t=>`${t} sin firma de ${!docs[t].firmaTrab&&!docs[t].firmaEmp?'ambas partes':(!docs[t].firmaTrab?'trabajador':'empleador')}`)
-      ];
-      incompletos.push({rut:worker.rut,nombre:worker.nombre,falta:detalles.join(' · ')});
-    }
+    finalizarWorkerActual(); // cierra la cuenta del último trabajador del archivo (para un archivo agrupado, los anteriores ya se cerraron al cambiar de worker dentro del loop)
   }
   const itemsContratos=dd.buffers.map((buf,bi)=>({buf,fname:(dd.files[bi]&&dd.files[bi].name)||''}));
   va_setProg(84,'⏳ Cargando OCR (paralelo)…');
