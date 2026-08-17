@@ -11465,44 +11465,93 @@ async function va_validarLiquidaciones(){
       const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
       let currentRut=null;
       let enContratoHasta=0; // última página (num) que todavía cuenta como parte de un Contrato en curso
+
+      // ── PASADA 1+2: texto nativo + OCR en paralelo (pool de workers) ──
+      // Antes: cada página escaneada se renderizaba y se le hacía OCR con UN
+      // SOLO worker, en fila, bloqueando la página siguiente hasta terminar.
+      // Ahora: se extrae primero el texto nativo de todas las páginas
+      // (secuencial, barato — getTextContent no se puede paralelizar en el
+      // hilo principal), y las páginas que necesitan OCR (textoUtil<40, el
+      // mismo umbral de siempre) se procesan en LOTES con un pool de
+      // workers en paralelo, reusando va_procesarArchivosEnParalelo (misma
+      // infraestructura ya validada para Libro/Contratos de Antofagasta).
+      // El resultado (texto final por página) es idéntico a antes — solo
+      // cambia CUÁNDO y con cuántos workers se calcula. La Pasada 3 de abajo
+      // (clasificación, currentRut, enContratoHasta) queda intacta, solo lee
+      // el texto ya resuelto de este caché en vez de recalcularlo — ver
+      // Skill acreditable-review para el detalle de por qué se acotó a este
+      // único punto de OCR (de los 5 que tiene la función) en esta ronda.
+      const cachePorPagina=new Array(pdf.numPages+1); // 1-indexed: {txt,textoUtil,tcItems,imgCount,fnArrayLength}
+      const ocrResultados=new Map(); // p -> texto OCR (solo páginas que lo necesitaron)
+      const poolSizeLiq=Math.min(4,navigator.hardwareConcurrency||4);
+      const LOTE_OCR=20; // páginas por lote, para no acumular demasiados blobs en memoria a la vez
+      for(let inicioLote=1;inicioLote<=pdf.numPages;inicioLote+=LOTE_OCR){
+        const finLote=Math.min(inicioLote+LOTE_OCR-1,pdf.numPages);
+        const paginasParaOCR=[];
+        for(let p=inicioLote;p<=finLote;p++){
+          const progPct1=Math.round(6+(p/pdf.numPages)*13);
+          if(p%5===0||p===1) va_setProg(Math.min(progPct1,20),`📄 Liquidaciones: leyendo texto pág ${p}/${pdf.numPages}`);
+          const page=await pdf.getPage(p);
+          const tc=await page.getTextContent();
+          // Fix 2+3: reconstruir texto con líneas (va_textoConLineas) igual que Módulo 6
+          const items=[...tc.items].filter(it=>it.str&&it.str.trim());
+          // agrupar por Y con tolerancia 3px
+          const lineMap=new Map();
+          for(const it of items){
+            const y=Math.round(it.transform[5]);
+            let key=null;
+            for(const k of lineMap.keys()){if(Math.abs(k-y)<=3){key=k;break;}}
+            if(key===null){key=y;lineMap.set(key,[]);}
+            lineMap.get(key).push({x:it.transform[4],str:it.str});
+          }
+          const sortedYs=[...lineMap.keys()].sort((a,b)=>b-a);
+          const lines=sortedYs.map(y=>lineMap.get(y).sort((a,b)=>a.x-b.x).map(i=>i.str).join(' '));
+          const txt=lines.join('\n');
+          const textoUtil=txt.replace(/\s/g,'').length;
+          const opList=await page.getOperatorList();
+          const imgCount=opList.fnArray.filter(fn=>fn===pdfjsLib.OPS?.paintImageXObject||fn===85).length;
+          cachePorPagina[p]={txt,textoUtil,tcItems:tc.items.length,imgCount,fnArrayLength:opList.fnArray.length};
+          // Fix 2: OCR si página escaneada (poco texto extractable) — acá
+          // solo se renderiza y se guarda el blob; el OCR en sí se hace en
+          // la Pasada 2 (en paralelo), no bloquea la extracción de las
+          // demás páginas del lote.
+          if(textoUtil<40&&ren_ocrWorker){
+            try{
+              const vp=page.getViewport({scale:3.0});
+              const canvas=document.createElement('canvas');
+              canvas.width=vp.width;canvas.height=vp.height;
+              await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+              const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
+              paginasParaOCR.push({p,blob});
+            }catch(re){console.warn('Render OCR p'+p+':',re);}
+          }
+          page.cleanup();
+        }
+        if(paginasParaOCR.length){
+          await va_procesarArchivosEnParalelo(paginasParaOCR,poolSizeLiq,async(item,worker)=>{
+            try{
+              const{data:{text}}=await worker.recognize(item.blob);
+              if(text&&text.replace(/\s/g,'').length>20) ocrResultados.set(item.p,text);
+            }catch(ocrErr){console.warn('OCR paralelo p'+item.p+':',ocrErr);}
+          });
+        }
+      }
+
+      // ── PASADA 3: clasificación página por página (lógica original, SIN CAMBIOS) ──
       for(let p=1;p<=pdf.numPages;p++){
         // Progreso: 6-34% repartido entre todas las páginas de todos los buffers
-        const progPct=Math.round(6+(p/pdf.numPages)*26);
+        const progPct=Math.round(20+(p/pdf.numPages)*14);
         if(p%5===0||p===1) va_setProg(Math.min(progPct,34),`📄 Liquidaciones: pág ${p}/${pdf.numPages}`);
-        const page=await pdf.getPage(p);const tc=await page.getTextContent();
-        // Fix 2+3: reconstruir texto con líneas (va_textoConLineas) igual que Módulo 6
-        const items=[...tc.items].filter(it=>it.str&&it.str.trim());
-        // agrupar por Y con tolerancia 3px
-        const lineMap=new Map();
-        for(const it of items){
-          const y=Math.round(it.transform[5]);
-          let key=null;
-          for(const k of lineMap.keys()){if(Math.abs(k-y)<=3){key=k;break;}}
-          if(key===null){key=y;lineMap.set(key,[]);}
-          lineMap.get(key).push({x:it.transform[4],str:it.str});
-        }
-        const sortedYs=[...lineMap.keys()].sort((a,b)=>b-a);
-        const lines=sortedYs.map(y=>lineMap.get(y).sort((a,b)=>a.x-b.x).map(i=>i.str).join(' '));
-        let txt=lines.join('\n');
-        let textoUtil=txt.replace(/\s/g,'').length;
-        // Fix 2: OCR si página escaneada (poco texto extractable)
-        if(textoUtil<40&&ren_ocrWorker){
-          try{
-            const vp=page.getViewport({scale:3.0});
-            const canvas=document.createElement('canvas');
-            canvas.width=vp.width;canvas.height=vp.height;
-            await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
-            const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
-            const {data:{text}}=await ren_ocrWorker.recognize(blob);
-            if(text&&text.replace(/\s/g,'').length>20){txt=text;textoUtil=txt.replace(/\s/g,'').length;}
-          }catch(ocrErr){console.warn('OCR p'+p+':',ocrErr);}
-        }
+        const page=await pdf.getPage(p);
+        const cache=cachePorPagina[p];
+        const txt=ocrResultados.has(p)?ocrResultados.get(p):cache.txt;
+        const textoUtil=ocrResultados.has(p)?txt.replace(/\s/g,'').length:cache.textoUtil;
         // ╔═══════════════════════════════════════════════════════════════════════╗
         // ║  CLASIFICACIÓN DE PÁGINA (v5) — perfiles reales + CI mejorada          ║
         // ╚═══════════════════════════════════════════════════════════════════════╝
-        const opList = await page.getOperatorList();
-        const imgCount = opList.fnArray.filter(fn => fn === pdfjsLib.OPS?.paintImageXObject || fn === 85).length;
-        const tcItems = tc.items.length;
+        const imgCount = cache.imgCount;
+        const tcItems = cache.tcItems;
+        const fnArrayLength = cache.fnArrayLength;
         const txtLen = txt.replace(/\s/g, '').length;
         const pdfView = page.view;
         const pdfRatio = pdfView[2] / pdfView[3];
@@ -11729,7 +11778,7 @@ async function va_validarLiquidaciones(){
 
         // Firma digital: texto de firma electrónica (cuando el texto no está encodificado)
         // O patrón estructural BUK: draws≈400-460, imgs=0, txt~340-400ch encodificado
-        const esFirmaBUKEstructural=(imgCount===0&&opList.fnArray.length>200&&opList.fnArray.length<600&&
+        const esFirmaBUKEstructural=(imgCount===0&&fnArrayLength>200&&fnArrayLength<600&&
           tcItems>0&&txt.replace(/\s/g,'').length>100&&txt.replace(/\s/g,'').length<450);
         const esFirma=esFirmaBUKEstructural||
           (/firmado.{0,20}electr[oó]n/i.test(txt))||

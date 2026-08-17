@@ -732,6 +732,70 @@ tratarlo como "❌ faltante" habría sido un falso positivo sistemático, no
 un hallazgo real. Mismo principio que ya aplicaba de forma implícita la
 rama NUEVO de `va_clasificar` — acá se hizo explícito.
 
+## Paralelizar OCR DENTRO de un mismo archivo (no solo entre archivos)
+
+El patrón de paralelización anterior (pool de workers, uno por ARCHIVO
+completo — ver sección de arriba) no sirve cuando la base sube un solo PDF
+unificado (confirmado con el usuario: Lo Barnechea siempre sube así) — no
+hay varios archivos entre los que repartir. `va_validarLiquidaciones()`
+(index.html:11443+) se reestructuró en 3 pasadas para paralelizar el OCR
+DENTRO de un mismo archivo, sin tocar la lógica de clasificación:
+
+1. **Pasada 1 (secuencial, barata)**: recorre las páginas extrayendo texto
+   nativo (`getTextContent`) y, si `textoUtil<40` (mismo umbral de
+   siempre), renderiza y junta el blob — pero NO llama a `recognize()`
+   todavía. Guarda todo en un caché por página (`cachePorPagina`, incluye
+   `tcItems`/`imgCount`/`fnArrayLength` — los valores que la clasificación
+   necesita más adelante y que NO dependen de si hubo OCR o no). Se procesa
+   en lotes de 20 páginas (`LOTE_OCR`) para no acumular demasiados blobs en
+   memoria a la vez, con `page.cleanup()` al final de cada página (mismo
+   patrón que ya usa `iav_escanearGrande`, comentario "clave para no
+   reventar la memoria con 30–50 MB").
+2. **Pasada 2 (la única parte realmente paralela)**: los blobs juntados en
+   cada lote se procesan con `va_procesarArchivosEnParalelo` (función
+   GENÉRICA ya existente, index.html:2233 — no hace falta escribir un
+   pool nuevo, acepta cualquier lista de items) contra `va_ocrPool`
+   (hasta 4 workers, `Math.min(4,navigator.hardwareConcurrency||4)`, mismo
+   criterio que Libro/Contratos). Los resultados van a un
+   `Map(página→texto)`.
+3. **Pasada 3 (secuencial, lógica ORIGINAL sin cambios)**: el loop de
+   clasificación de siempre — `currentRut`, `enContratoHasta`, todos los
+   detectores de tipo de documento, población de `va_liqMap` — copiado tal
+   cual, con el único cambio de que `txt`/`textoUtil`/`imgCount`/`tcItems`
+   salen del caché de la Pasada 1 (o de `ocrResultados` si esa página tuvo
+   OCR) en vez de recalcularse inline.
+
+**Por qué es más seguro que tocar la clasificación directamente**: el orden
+y la lógica de `currentRut`/`enContratoHasta` (de los que depende TODA la
+atribución RUT↔documento) no cambian en absoluto — se siguen calculando en
+la Pasada 3, en el mismo orden de páginas de siempre. Lo único que cambia
+es CUÁNDO y con cuántos workers se hace el trabajo caro (OCR), que es
+independiente entre páginas por diseño (el texto OCR de la página P no
+depende de la página P-1).
+
+**Alcance deliberadamente acotado**: la función tiene 5 puntos distintos de
+render+OCR/IA por página (el OCR principal recién descrito, la IA de
+página ambigua, la firma física del Contrato, el thumbnail de firma, y una
+"red de seguridad" de recuperación de RUT) — solo se paralelizó el
+primero (el más frecuente, se dispara en casi todas las páginas
+escaneadas de Antofagasta). Los otros 4 siguen usando el `ren_ocrWorker`
+global, en fila, exactamente como antes. Paralelizar los 5 habría
+requerido una reestructuración de 3-4 fases (uno de ellos,
+`enContratoHasta`, depende de páginas ANTERIORES) — decisión explícita del
+usuario de no encarar eso todavía, para no arriesgar la función más grande
+y con más estado interno del proyecto de una sola vez.
+
+**Validación en esta sesión**: se confirmó que la función sigue parseando
+sin errores de sintaxis, que ninguna otra parte del archivo referencia
+`tc`/`opList` fuera de la Pasada 1 (`grep` dedicado, encontró y corrigió
+una referencia a `opList.fnArray.length` en `esFirmaBUKEstructural` que se
+había pasado por alto al planificar — se agregó `fnArrayLength` al caché),
+y que `va_procesarArchivosEnParalelo` reparte páginas sintéticas (33-47
+items) entre 4 workers falsos sin duplicados ni saltos. **No se pudo medir
+la mejora de velocidad real ni confirmar el resultado final contra un
+archivo de Lo Barnechea real** — misma limitación de sandbox de siempre —
+hace falta que el usuario lo corra y reporte.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
