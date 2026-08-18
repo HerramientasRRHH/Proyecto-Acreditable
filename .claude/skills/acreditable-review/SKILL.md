@@ -1506,6 +1506,41 @@ comprobante) — no se encontró un bug estructural nuevo específico de
 archivos combinados, más allá de los 2 ya documentados arriba (que
 también aparecen en archivos de una sola letra).
 
+## va_findAllRutsRaw v1 vs v2: auditar a la escala EQUIVOCADA da un número falso
+
+Con v1 desplegado, el usuario corrió la validación real: 58→51
+SIN_LIQUIDACION, solo 7 de 41 resueltos — muy por debajo de lo esperado.
+Se investigó con Correa Castañeda Nila (RUT real 23.162.740-5): la página
+es perfectamente legible a simple vista, pero a escala 2.5 Tesseract pierde
+el dígito verificador por completo ("23,162.7:10-", sin nada después del
+guión) — a escala 3.0 SÍ aparece, aunque mal leído ("...7:10-5", el ":" no
+estaba en la lista de separadores tolerados de v1). Fix v2: en vez de
+enumerar separadores, captura TODO el bloque entre "RUT:" y la siguiente
+etiqueta del formulario, sin importar el ruido intermedio.
+
+**Trampa real al validar esto**: el primer intento de medir "¿cuántos
+resuelve v2?" corriendo el audit completo (33 casos, ~280 páginas) dio
+resultados que NO coincidían con lo ya confirmado a mano (Correa salía
+"no resuelto" pese a haberse verificado que SÍ funciona) — la causa era
+que el script de auditoría usaba `get_pdf_text_ocr` con su escala default
+(2.5, la misma que la `va_getPdfTextOCR` COMPARTIDA), pero
+`va_validarLiquidaciones` hace su PROPIO OCR inline a escala 3.0 (no pasa
+por la función compartida). Auditar a la escala equivocada literalmente
+reproduce el bug v1 estaba resolviendo (pérdida del dígito a 2.5) y da un
+resultado sistemáticamente peor de lo real. **Antes de auditar cualquier
+lectura, confirmar a qué escala hace su OCR el código real que se está
+probando — no asumir que toda la app usa la misma escala en todos
+lados.**
+
+Con la escala corregida (3.0): **18 de 34 casos no-V resueltos (53%)** —
+validado con réplica fiel contra los 12 archivos reales completos. Quedan
+16 sin resolver + 17 de letra V (archivo faltante) = 33, bajando de los
+58 originales. Los 16 restantes no se investigaron caso por caso todavía
+— candidatos para una vuelta futura si el usuario la pide, probablemente
+mezclan el mismo patrón "dígito perdido a cierta escala" (posible mejora:
+probar 2-3 escalas y quedarse con la que da más texto útil, como ya se
+hace para rotación) con casos de atribución página-trabajador distintos.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
