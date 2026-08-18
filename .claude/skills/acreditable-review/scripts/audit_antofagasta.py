@@ -80,6 +80,29 @@ def find_all_ruts(txt):
         add_rut(ruts, ''.join(m.groups()[:7])+'-'+m.group(8))
     return ruts
 
+# ── va_findAllRutsRaw: mismo patrón 1/2/4 SIN validar DV, para alimentar el
+# rescate por Levenshtein (va_matchRutCercano) cuando el checksum descarta
+# el candidato real por 1 dígito mal leído ──
+def find_all_ruts_raw(txt):
+    ruts = set()
+    for m in re.finditer(r'(?<![\d.,])(\d{1,2})[.,\s](\d{3})[.,\s](\d{3})[\s-]+(\d|[kK])', txt):
+        ruts.add(norm_rut(m.group(1)+m.group(2)+m.group(3)+'-'+m.group(4)))
+    for m in re.finditer(r'(?<!\d)(\d{7,8})\s*-\s*(\d|[kK])(?!\d)', txt):
+        ruts.add(norm_rut(m.group(1)+'-'+m.group(2)))
+    for m in re.finditer(r'RUT[:\s.]*(\d[\d\s|.,/-]{6,20}[\dkK])', txt, re.I):
+        ruts.add(norm_rut(re.sub(r'[\s|.,]', '', m.group(1))))
+    return ruts
+
+def match_rut_cercano(candidato, lista_validos):
+    mejor=None; mejor_d=999; segundo_d=999
+    for r in lista_validos:
+        d = levenshtein(candidato, r)
+        if d < mejor_d: segundo_d = mejor_d; mejor_d = d; mejor = r
+        elif d < segundo_d: segundo_d = d
+    if mejor is None or mejor_d > 1: return None
+    if segundo_d - mejor_d < 1: return None
+    return mejor
+
 # ── va_dvRut / va_extraerRutConChecksum (rescate por checksum) ──
 def dv_rut(cuerpo):
     suma = 0; mult = 2

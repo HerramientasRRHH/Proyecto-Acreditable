@@ -10756,6 +10756,19 @@ function va_findAllRutsRaw(txt){
   for(const m of txt.matchAll(/(?<!\d)(\d{7,8})\s*-\s*(\d|[kK])(?!\d)/g)){
     ruts.add(va_normRut(m[1]+'-'+m[2]));
   }
+  // Patrón 4 de va_findAllRuts (RUT anclado a la etiqueta "RUT:"), acá SIN
+  // validar DV — caso real (Antofagasta, Liquidaciones): auditoría de una
+  // corrida real mostró decenas de trabajadores "sin liquidación" que en
+  // realidad SÍ tenían su página (apellido legible en el documento), pero
+  // el RUT salía con 1 dígito mal leído (ej. real "RUT: 13.603.630-2" con
+  // DV real "0") — Patrón 1/2 (arriba) a veces no producen NINGÚN candidato
+  // si el ruido de OCR rompe la puntuación esperada, pero la etiqueta
+  // "RUT:" seguida de un bloque de dígitos suele sobrevivir igual. Este
+  // patrón le da al rescate por Levenshtein (va_matchRutCercano, llamado
+  // después de esto) una segunda fuente de candidatos crudos para probar.
+  for(const m of txt.matchAll(/RUT[:\s.]*(\d[\d\s|.,/-]{6,20}[\dkK])/gi)){
+    ruts.add(va_normRut(m[1].replace(/[\s|.,]/g,'')));
+  }
   return ruts;
 }
 
