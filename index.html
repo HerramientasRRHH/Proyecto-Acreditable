@@ -12664,10 +12664,16 @@ function va_clasificar(t,liq){
     r.docsReq.push('Finiquito');return r;
   }
 
-  // Sin liquidación en PDF
+  // Sin liquidación en PDF — pedido explícito del usuario: TODOS los que
+  // aparecen en el Libro de Haberes del mes (activos, sin Fecha Término —
+  // ese caso ya se filtró arriba) deben tener liquidación, sin excepción.
+  // Antes se eximía a quien tuviera 'Total Haberes Imponibles'=0 ese mes
+  // (tratado como 'SIN_ACTIVIDAD', ni se contaba como faltante) — en la
+  // corrida real de Antofagasta esto dejaba a 16 trabajadores activos sin
+  // chequear si tenían o no su liquidación. Ya no hay excepción: si no se
+  // encontró liquidación en el PDF, siempre es SIN_LIQUIDACION.
   if(!liq||!liq.tieneLiq){
-    if(t.imp>0){r.caso='SIN_LIQUIDACION';r.estado='❌';r.msg='Activo sin liquidación en PDF';return r;}
-    else{r.caso='SIN_ACTIVIDAD';r.estado='—';r.msg='Sin haberes imponibles';return r;}
+    r.caso='SIN_LIQUIDACION';r.estado='❌';r.msg='Activo sin liquidación en PDF';return r;
   }
 
   // NUEVO: ingresó en el mes del período (Vitacura verifica nuevos en slot Contratos, no aquí)
