@@ -12442,9 +12442,18 @@ async function va_validarLicenciasMedicas(){
     for(const fila of txt.matchAll(VA_LIC_TABLA_OXPS_RE)){
       const candidatos=new Set();
       va_addRut(candidatos,fila[1]);
-      if(!candidatos.size)va_addRut(candidatos,fila[1].replace(/^\d/,''));
+      va_addRut(candidatos,fila[1].replace(/^\d/,''));
       if(!candidatos.size)continue;
-      const rutFila=[...candidatos][0];
+      // Preferir el candidato que matchea la nómina, no "el primero que pase
+      // el DV" -- cuando el número de fila pegado adelante del RUT también
+      // pasa el dígito verificador chileno por casualidad (~1/11 de las
+      // veces), la versión SIN recortar cuela un RUT inventado y tapa el
+      // real. Caso real confirmado: fila 40 "406.573.181-9" valida tanto
+      // como "06573181-9" (inventado, DV 9 por azar) como "6573181-9" (el
+      // real, Pelaez Pelaez Ana Leonor) -- sin este orden de preferencia la
+      // fila se descartaba por completo (el inventado nunca está en la LH).
+      let rutFila=[...candidatos].find(r=>lhRutSet.has(r));
+      if(!rutFila)rutFila=[...candidatos][0];
       if(!lhRutSet.has(rutFila))continue;
       va_licMedRuts.add(rutFila);
       n++;

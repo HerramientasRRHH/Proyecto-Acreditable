@@ -1600,3 +1600,37 @@ subieron esa vez — sobre todo en módulos que aceptan más de un tipo de
 archivo por slot (PDF + `.oxps`). Un archivo omitido produce el mismo
 síntoma ("cubre menos de lo esperado") que un bug real de lectura, pero el
 fix es "avisar al usuario que falta adjuntar X", no tocar código.
+
+### Actualización: el caso de Pelaez SÍ era un bug real — colisión de checksum al recortar el dígito de fila pegado
+
+El usuario preguntó si el caso restante (Pelaez Pelaez Ana Leonor) era por
+tratarse de una "licencia mutual" (tipo distinto de licencia). No era eso —
+al auditar las 68 filas del `.oxps` completo replicando la lógica exacta de
+`va_procesarFilasOxpsLicencia`, se encontró que **3 de 68 filas** (Barrera
+Zarate Clementina, Maguida Alvarez Estela, y Pelaez Pelaez Ana Leonor) tienen
+un número de fila glued al RUT (ej. fila 40 + RUT "6.573.181-9" →
+"406.573.181-9") donde, al recortar el primer dígito, la regex encuentra
+"06.573.181-9" -- y ese candidato SIN recortar TAMBIÉN pasa el dígito
+verificador chileno por pura casualidad (~1/11 de probabilidad, mismo
+fenómeno ya documentado para `va_findAllRuts` en tablas de montos). El
+código original probaba el candidato directo primero y solo intentaba el
+recortado `if(!candidatos.size)` -- es decir, SOLO si el directo había
+fallado el checksum. Como acá el directo (inventado, "06573181-9") SÍ
+pasaba el checksum, el código nunca llegaba a probar el recortado (el real,
+"6573181-9"), y como el inventado no está en la nómina, la fila se
+descartaba entera.
+
+**Fix aplicado** (`va_procesarFilasOxpsLicencia`, index.html ~línea 12440):
+probar SIEMPRE ambos candidatos (directo y recortado) y preferir el que
+efectivamente esté en `lhRutSet` (la nómina), en vez de quedarse con "el
+primero que pase el DV". Validado con las 68 filas reales del `.oxps`: las
+65 filas no ambiguas no cambian, y las 3 ambiguas ahora resuelven al RUT
+real de la nómina (antes se perdían). Con este fix + el `.oxps` incluido en
+la corrida, los 19/19 faltantes reportados por el usuario resuelven.
+
+Lección: cuando una heurística de rescate prueba "candidato A, si falla
+candidato B", y ambos pueden pasar una validación de checksum por
+casualidad, no alcanza con "el primero que pase" -- hay que preferir
+explícitamente el que además coincide con una fuente de verdad ya conocida
+(acá, la nómina). Mismo principio que `match_rut_cercano` en Liquidaciones,
+aplicado a un lugar donde antes no estaba.
