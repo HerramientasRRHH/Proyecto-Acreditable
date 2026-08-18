@@ -10756,18 +10756,26 @@ function va_findAllRutsRaw(txt){
   for(const m of txt.matchAll(/(?<!\d)(\d{7,8})\s*-\s*(\d|[kK])(?!\d)/g)){
     ruts.add(va_normRut(m[1]+'-'+m[2]));
   }
-  // Patrón 4 de va_findAllRuts (RUT anclado a la etiqueta "RUT:"), acá SIN
-  // validar DV — caso real (Antofagasta, Liquidaciones): auditoría de una
-  // corrida real mostró decenas de trabajadores "sin liquidación" que en
-  // realidad SÍ tenían su página (apellido legible en el documento), pero
-  // el RUT salía con 1 dígito mal leído (ej. real "RUT: 13.603.630-2" con
-  // DV real "0") — Patrón 1/2 (arriba) a veces no producen NINGÚN candidato
-  // si el ruido de OCR rompe la puntuación esperada, pero la etiqueta
-  // "RUT:" seguida de un bloque de dígitos suele sobrevivir igual. Este
-  // patrón le da al rescate por Levenshtein (va_matchRutCercano, llamado
-  // después de esto) una segunda fuente de candidatos crudos para probar.
-  for(const m of txt.matchAll(/RUT[:\s.]*(\d[\d\s|.,/-]{6,20}[\dkK])/gi)){
-    ruts.add(va_normRut(m[1].replace(/[\s|.,]/g,'')));
+  // RUT anclado a la etiqueta "RUT:", SIN validar DV — caso real
+  // (Antofagasta, Liquidaciones): auditoría de una corrida real mostró
+  // decenas de trabajadores "sin liquidación" que en realidad SÍ tenían su
+  // página (apellido legible), pero el RUT salía mal leído. Patrón 1/2 de
+  // arriba a veces no producen NINGÚN candidato si el ruido de OCR rompe
+  // la puntuación esperada.
+  // v2, caso real que rompía la primera versión (Correa Castañeda, RUT
+  // real 23.162.740-5): a escala de producción Tesseract leyó
+  // "23,162.7:10-5" — el ":" no está en la lista de separadores tolerados
+  // de la v1, así que el match se cortaba ANTES de llegar al dígito
+  // verificador real, dando un candidato inútil (muy corto). Esta versión
+  // ya no intenta enumerar qué caracteres de ruido tolerar — captura TODO
+  // el texto entre "RUT:" y la siguiente etiqueta reconocible del
+  // formulario (o el fin de línea) sin importar qué basura OCR haya en el
+  // medio, y recién ahí filtra dejando solo dígitos/k. Validado con los 2
+  // casos reales (Astete y Correa, distancia Levenshtein 1 en ambos tras
+  // limpiar) — ver skill acreditable-review.
+  for(const m of txt.matchAll(/RUT[:\s.]*([^\n]{6,30}?)(?:Inicio|Empresa|Salud|Previsi|\n|$)/gi)){
+    const cleaned=m[1].replace(/[^0-9kK]/g,'');
+    if(cleaned.length>=7&&cleaned.length<=9) ruts.add(va_normRut(cleaned));
   }
   return ruts;
 }
@@ -12012,6 +12020,24 @@ async function va_validarLiquidaciones(){
             for(const r of va_findAllRutsRaw(txt)){
               const cercano=va_matchRutCercano(r,lhRuts);
               if(cercano){pageRut=cercano;break;}
+            }
+          }
+          // Última red de seguridad: si NINGÚN intento de RUT (exacto, cercano,
+          // ni crudo) encontró nada, probar por NOMBRE — cada página de
+          // Liquidación de este formato imprime "Sr(a): Apellido, Nombre" al
+          // toque del título, con texto limpio/impreso (no manuscrito), mucho
+          // más tolerante a ruido de OCR que acertar 8 dígitos exactos. Caso
+          // real (Antofagasta): una corrida real de producción seguía sin
+          // resolver ~29 trabajadores por esta vía después de reforzar el
+          // rescate de RUT — la causa exacta en Tesseract.js real no se pudo
+          // reproducir en este sandbox (ver skill acreditable-review), así
+          // que en vez de seguir afinando el RUT se agrega una vía
+          // completamente distinta que no depende de leer dígitos bien.
+          if(!pageRut){
+            const mNombreLiq=txt.match(/Sr\(a\):\s*([A-ZÁÉÍÓÚÑ][^\n]{3,60}?)(?:\s+Tipo\s+Contrato|\n)/i);
+            if(mNombreLiq){
+              const matchNombreLiq=va_matchNombreNomina(mNombreLiq[1].trim(),va_lhFiltered);
+              if(matchNombreLiq)pageRut=matchNombreLiq.rutNorm;
             }
           }
         }

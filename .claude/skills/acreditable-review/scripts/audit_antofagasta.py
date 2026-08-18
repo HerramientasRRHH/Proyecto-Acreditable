@@ -89,8 +89,13 @@ def find_all_ruts_raw(txt):
         ruts.add(norm_rut(m.group(1)+m.group(2)+m.group(3)+'-'+m.group(4)))
     for m in re.finditer(r'(?<!\d)(\d{7,8})\s*-\s*(\d|[kK])(?!\d)', txt):
         ruts.add(norm_rut(m.group(1)+'-'+m.group(2)))
-    for m in re.finditer(r'RUT[:\s.]*(\d[\d\s|.,/-]{6,20}[\dkK])', txt, re.I):
-        ruts.add(norm_rut(re.sub(r'[\s|.,]', '', m.group(1))))
+    # v2: captura TODO el bloque entre "RUT:" y la siguiente etiqueta del
+    # formulario (o fin de línea), sin enumerar qué separadores tolerar --
+    # ver comentario en la version JS (index.html, va_findAllRutsRaw).
+    for m in re.finditer(r'RUT[:\s.]*([^\n]{6,30}?)(?:Inicio|Empresa|Salud|Previsi|\n|$)', txt, re.I):
+        cleaned = re.sub(r'[^0-9kK]', '', m.group(1))
+        if 7 <= len(cleaned) <= 9:
+            ruts.add(norm_rut(cleaned))
     return ruts
 
 def match_rut_cercano(candidato, lista_validos):
