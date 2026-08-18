@@ -1246,6 +1246,120 @@ tiene un tope de páginas explícito y suficientemente alto — no asumir que
 es un problema de calidad de OCR sin antes descartar esto, que ya salió 3
 veces en un solo día.
 
+## Sesión de auditoría completa (Finiquitos → Liquidaciones): 8 causas raíz reales, todas con datos reales
+
+El usuario reportó "se rompió el reconocimiento documental" de forma
+genérica — en vez de adivinar un solo fix, se auditó módulo por módulo
+contra los documentos reales de `Documentos Antofagasta/` (341 trabajadores,
+LH real del período). Resumen de lo encontrado, para no repetir el mismo
+diagnóstico dos veces:
+
+1. **Finiquitos "no reconoce nada"**: no era el tope de páginas (ya se
+   había subido a 100 antes) — era que `va_getPdfTextOCR` nunca se
+   auto-cargaba el motor OCR (`cargarOCR()`); dependía 100% de que
+   `va_validarLiquidaciones` ya lo hubiera hecho antes, pero esa función
+   corta con `return` si el slot `'liq'` no tiene archivos ESE mes/corrida
+   — dejando `ren_ocrWorker` en `null` para siempre. Fix: la función se
+   auto-carga el OCR si hace falta.
+2. **Libro de Remuneraciones 0% → 66.3%**: el documento viene escaneado con
+   orientación MEZCLADA por página (90°/180°, no fija) — el mecanismo de
+   rotación existente nunca se disparaba porque su gate ("¿salió poco
+   texto?") no sirve cuando la rotación equivocada igual produce miles de
+   caracteres de basura. Fix acotado a este módulo: prueba las 4 rotaciones
+   siempre y elige la que encuentra más RUT con DV válido.
+3. **Libro de Asistencia**: dos causas reales para el "0 vía OCR, todo por
+   IA" — (a) el regex `TRABAJADOR_RE` a veces captura una palabra de ruido
+   extra al final (ej. real: "MBARGUEN LILIA mes JoMo"), y el matcher exige
+   cobertura EXACTA de 1.0 así que una sola palabra de más lo rechaza — fix:
+   `va_matchNombreConRecorte`, reintenta recortando desde el final. (b) los
+   archivos vienen organizados por letra de apellido — restringir el pool de
+   matching a esa letra (`va_candidatosLibroPorLetra`) elimina la mayoría de
+   los empates por ambigüedad entre personas de letras distintas.
+4. **Contratos "dice que faltan documentos que sí están"**: el título del
+   Anexo HHEE a veces sale con 1-2 caracteres OCR-corruptos (real: "ANEXO DE
+   CONTRA O DE TRABAJO"), el regex exacto no matchea, y el fallback genérico
+   de "CONTRATO" escaneaba la página ENTERA — encontrando la frase dentro
+   del propio cuerpo del Anexo (que menciona el contrato original) y
+   reclasificando mal. Fix: tolerancia por Levenshtein en el título + el
+   fallback genérico ahora solo mira los primeros 100 caracteres.
+5. **Licencias Médicas 0% real de cobertura**: el listado tabular completo
+   vivía en un `.oxps` (formato XPS de Windows) que el input ni aceptaba
+   (`accept='.pdf'` solo). Es un ZIP igual que `.docx` — nueva función
+   `va_readOxpsText`. Complicación real: el texto extraído no trae espacios
+   entre columnas y el RUT sale con el N° de fila pegado adelante (mismo
+   patrón ya visto en Libro de Remuneraciones) — se resuelve probando el
+   RUT capturado tal cual y, si no pasa el DV, recortándole el primer
+   dígito.
+6. **Cálculo de días de licencia que cruzan de mes**: verificado explícito
+   con un caso real (licencia 19-jun a 02-jul, 14 días totales, 2 en julio)
+   — `va_diasLicenciaEnPeriodo` YA lo calculaba bien, en todos los caminos
+   (formulario individual, tabla PDF, `.oxps` nuevo). No hizo falta ajuste;
+   quedó documentado para no re-auditar esto de nuevo sin motivo.
+7. **Liquidaciones — regla de negocio, no bug de lectura**: pedido explícito
+   del usuario, "TODOS los que aparecen en el LH del mes deben tener
+   liquidación, sin excepción". `va_clasificar` eximía a quien tuviera
+   `Total Haberes Imponibles=0` ese mes (`SIN_ACTIVIDAD`, no contaba como
+   faltante) — 16 trabajadores activos reales quedaban sin chequear. Se
+   sacó la excepción.
+8. **Firma física en Anexos de Contrato — pendiente sin resolver**: el
+   usuario reportó Anexos marcados "sin firma de trabajador" que, al
+   revisar la página real (PyMuPDF → PNG, mirado directamente), SÍ tenían
+   firma manuscrita + timbre de empresa. La verificación en vivo contra el
+   pipeline real (Tesseract.js + `va_detectarFirmaFisicaPorEtiqueta`) no
+   pudo completarse en el sandbox (>10 min sin terminar 2 páginas de OCR) —
+   **queda sin confirmar la causa exacta**, no se aplicó ningún fix a
+   ciegas. Antes de tocar esa función, reproducir en un navegador real y
+   mirar qué `words`/bbox devuelve Tesseract.js sobre el timbre circular
+   (texto curvo, más difícil de leer que una firma lineal).
+
+## Paralelización de Liquidaciones (segundo intento, con la salvaguarda)
+
+El primer intento de paralelizar `va_validarLiquidaciones` (commit `ebf68eb`,
+documentado arriba en "Se revirtió la paralelización...") paralelizaba
+PÁGINAS dentro de un mismo PDF grande (patrón pensado para Lo Barnechea, que
+sube un solo PDF) y dejaba el pool de workers vivo el resto de la corrida —
+sospecha razonada (nunca confirmada con medición real) de que esto causó 2
+corridas reales colgadas, porque Finiquitos/Licencias/Exenciones/F30/F30-1/
+PreviRed corren DESPUÉS en el pipeline y dependen del worker único global.
+
+Este segundo intento es un patrón DISTINTO, pedido explícito del usuario:
+Antofagasta divide Liquidaciones en ~24 archivos (uno por letra de
+apellido, no un PDF único) — cada archivo ya resetea su propio estado
+pegajoso (`currentRut`, `enContratoHasta`) al empezar, exactamente el mismo
+patrón ya validado sin incidentes en Contratos y Libro de Asistencia
+(paralelizar por ARCHIVO completo, nunca páginas sueltas de un mismo
+archivo). La diferencia clave con el intento revertido: **el pool se libera
+explícitamente** (`va_liberarOCRPool()`, nueva función — termina cada
+worker y limpia `va_ocrPool`) apenas termina `va_validarLiquidaciones`,
+ANTES de que corran los pasos secuenciales que le siguen — la salvaguarda
+que el intento anterior no tenía.
+
+Detalle técnico que casi se pasa por alto: `va_ocrRunLicenciaMedica`
+(llamada dentro del loop, en la "red de seguridad" de RUT no encontrado)
+usaba el `ren_ocrWorker` GLOBAL hardcodeado, no un parámetro — si se
+paraleliza sin arreglar esto, todas las llamadas desde archivos distintos
+pisarían el mismo worker global (incluyendo `setParameters` de whitelist de
+caracteres, mutación de estado compartida) en vez de usar cada una su
+worker del pool. Se le agregó parámetro `worker` opcional (default al
+global, mismo patrón que `va_ocrPaginaMejorRotacion`) y se actualizó el
+único llamado interno para pasar el worker local.
+
+**Verificado en el navegador real (no en Python)**: se armó una corrida con
+4 archivos reales chicos (letras I/J/K/U, 1-2 páginas cada uno) y se
+confirmó en consola que arrancan los 4 EN PARALELO ("4 en curso
+simultáneamente") — la mecánica de reparto funciona. **No se pudo confirmar
+en el sandbox que la corrida completa (con archivos reales de hasta 44
+páginas, 24 archivos) termine y libere el pool sin problemas** — la misma
+limitación de siempre (Tesseract.js en este sandbox es demasiado lento para
+correr un caso real completo, ni con archivos chicos: 6 páginas repartidas
+en 4 workers no terminaron en >10 minutos). Antes de dar esto por
+completamente validado, hace falta que el usuario lo corra real y confirme
+en su consola: que aparecen múltiples "archivo N iniciado" simultáneos
+(paralelismo real), que aparecen los "archivo N terminado" correspondientes
+(no se cuelga ningún archivo), y que los pasos siguientes (Finiquitos,
+Licencias) arrancan con normalidad después (el pool efectivamente se
+liberó).
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),

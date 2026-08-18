@@ -2224,6 +2224,25 @@ async function va_cargarOCRPool(n){
   va_ocrPool=(va_ocrPool||[]).concat(nuevos);
   return va_ocrPool;
 }
+// Libera el pool de workers OCR (los termina y limpia va_ocrPool). Necesario
+// después de un paso paralelizado que corre TEMPRANO en va_ejecutar (ej.
+// Liquidaciones) — si el pool queda vivo, compite por CPU con el resto del
+// pipeline (Finiquitos, Licencias, Exenciones, F30, F30-1, PreviRed), que
+// depende del worker único global (ren_ocrWorker) y no del pool. Esto es
+// justo lo que causó 2 corridas reales colgadas cuando se paralelizó
+// va_validarLiquidaciones la primera vez (revertido, ver skill
+// acreditable-review) — esta vez el pool se libera explícitamente apenas
+// termina el paso que lo usó, en vez de quedar vivo "por si acaso".
+// Pasos que corren AL FINAL del pipeline (Contratos/Libro Asistencia de
+// Antofagasta) no necesitan llamar a esto — no queda nada después que
+// dependa de un worker único sin contención.
+async function va_liberarOCRPool(){
+  if(!va_ocrPool)return;
+  for(const w of va_ocrPool){
+    try{await w.terminate();}catch(e){console.warn('Error terminando worker OCR del pool:',e);}
+  }
+  va_ocrPool=null;
+}
 // Reparte una lista de "archivos" (buffers u otro item por archivo) entre un
 // pool de workers — cada worker toma el SIGUIENTE archivo libre de la cola
 // apenas termina el anterior (mejor balance que asignar archivos fijos por
@@ -10968,8 +10987,9 @@ async function va_ocrPaginaMejorRotacion(page,scale,angulos,worker){
 // Recorta la fila "A.1 IDENTIFICACIÓN DEL TRABAJADOR", que está en la misma posición
 // en todo Chile (es un formulario único), y hace OCR restringido a dígitos+guión
 // para minimizar la confusión con las líneas de las casillas.
-async function va_ocrRunLicenciaMedica(page){
-  if(!ren_ocrWorker)return null;
+async function va_ocrRunLicenciaMedica(page,worker){
+  worker=worker||ren_ocrWorker;
+  if(!worker)return null;
   try{
     const vp=page.getViewport({scale:3.5});
     const canvas=document.createElement('canvas');
@@ -10989,11 +11009,11 @@ async function va_ocrRunLicenciaMedica(page){
     const blob=await new Promise(res=>zCanvas.toBlob(res,'image/png'));
     let text='';
     try{
-      await ren_ocrWorker.setParameters({tessedit_char_whitelist:'0123456789-'});
-      const r=await ren_ocrWorker.recognize(blob);
+      await worker.setParameters({tessedit_char_whitelist:'0123456789-'});
+      const r=await worker.recognize(blob);
       text=(r&&r.data&&r.data.text)||'';
     }finally{
-      await ren_ocrWorker.setParameters({tessedit_char_whitelist:''});
+      await worker.setParameters({tessedit_char_whitelist:''});
     }
     return text;
   }catch(e){console.warn('OCR RUN Licencia Médica falló:',e);return null;}
@@ -11526,7 +11546,26 @@ async function va_validarLiquidaciones(){
   const IA_LIBRO_MAX_PAGINAS=window.VA_IA_LIBRO_MAX||Infinity;
   let iaLibroPaginasUsadas=0;
   let iaLibroErrores=0;
-  for(const buf of dd.buffers){
+  // Antofagasta divide Liquidaciones en ~24 archivos, uno por letra de
+  // apellido — cada uno resetea su propio estado pegajoso (currentRut,
+  // enContratoHasta) al empezar el archivo, así que son independientes
+  // entre sí y se pueden procesar en paralelo, mismo patrón ya validado sin
+  // incidentes en Contratos y Libro de Asistencia. A diferencia del intento
+  // anterior (revertido — ver skill acreditable-review) que paralelizaba
+  // PÁGINAS dentro de un mismo PDF gigante y dejaba el pool de workers vivo
+  // compitiendo con el resto del pipeline (causó 2 corridas reales
+  // colgadas), acá se paraleliza por ARCHIVO completo y el pool se libera
+  // explícitamente apenas termina (va_liberarOCRPool), ANTES de que corran
+  // Finiquitos/Licencias/Exenciones/F30/F30-1/PreviRed — todos dependen del
+  // worker único global y no deben competir con un pool vivo. Esa es la
+  // salvaguarda que faltó la primera vez.
+  let archivosLiqIniciados=0,archivosLiqEnCurso=0;
+  async function procesarArchivoLiquidacion(buf,ocrWorkerAsignado){
+    const ren_ocrWorker=ocrWorkerAsignado; // shadow local: todo el cuerpo de abajo usa el worker que le tocó a ESTE archivo
+    archivosLiqIniciados++;archivosLiqEnCurso++;
+    const miArchivoLiqNum=archivosLiqIniciados;
+    console.log(`[Liquidaciones] archivo ${miArchivoLiqNum} iniciado — ${archivosLiqEnCurso} en curso simultáneamente`);
+    try{
     try{
       const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
       let currentRut=null;
@@ -12120,7 +12159,7 @@ async function va_validarLiquidaciones(){
         // perdida. Si el RUT validado no es el "currentRut" de esta página (pudo
         // perderse el rastro), igual se marca tieneLicMed sobre el trabajador correcto.
         if(!esLicMed && textoUtil<40){
-          const runTxt=await va_ocrRunLicenciaMedica(page);
+          const runTxt=await va_ocrRunLicenciaMedica(page,ren_ocrWorker);
           const rutValidado=va_extraerRutConChecksum(runTxt,new Set(va_lhFiltered.map(x=>x.rutNorm)));
           if(rutValidado){
             if(!va_liqMap.has(rutValidado)) va_liqMap.set(rutValidado,{firmado:false,firmaFisica:false,firmaFisicaImg:null,liqThumbImg:null,manualOK:false,dias:0,licencias:0,permisos:0,inasistencias:0,
@@ -12130,7 +12169,18 @@ async function va_validarLiquidaciones(){
         }
       }
     }catch(e){console.error('Liq error:',e);}
+    }finally{
+      archivosLiqEnCurso--;
+      console.log(`[Liquidaciones] archivo ${miArchivoLiqNum} terminado — quedan ${archivosLiqEnCurso} en curso`);
+    }
   }
+  va_setProg(6,'⏳ Cargando OCR (paralelo)…');
+  await va_procesarArchivosEnParalelo(dd.buffers,Math.min(4,navigator.hardwareConcurrency||4),procesarArchivoLiquidacion);
+  // Salvaguarda: liberar el pool apenas termina Liquidaciones, para que
+  // Finiquitos/Licencias/Exenciones/F30/F30-1/PreviRed (todos secuenciales,
+  // dependen del worker único global) no compitan con un pool de 4 workers
+  // vivo — ver nota completa en va_liberarOCRPool().
+  await va_liberarOCRPool();
   // NOTA: antes había acá una "propagación section-wide" que, apenas
   // encontraba a UN trabajador con Libro, le marcaba tieneLibro=true a TODOS
   // los demás también (sin verificar nada) cuando no había IA configurada.
