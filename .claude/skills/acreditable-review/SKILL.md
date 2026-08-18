@@ -1393,6 +1393,65 @@ en su consola: que aparecen múltiples "archivo N iniciado" simultáneos
 Licencias) arrancan con normalidad después (el pool efectivamente se
 liberó).
 
+## SIN_LIQUIDACION masivo puede ser un archivo de letra faltante, no un bug — chequealo ANTES de auditar lectura
+
+El usuario mandó el Excel exportado de una corrida real (Antofagasta, 341
+LH, 58 SIN_LIQUIDACION de 330 activos) pidiendo auditar por qué. Antes de
+tocar código: agrupar los casos flageados por PRIMERA LETRA DEL APELLIDO
+(no por RUT) — 17 de los 58 tenían apellido con V, y el LH real tiene
+EXACTAMENTE 17 activos de apellido V (coincidencia perfecta). La carpeta de
+Liquidaciones de Antofagasta reparte los PDF por letra de apellido
+(`A. liquidación letra A.pdf`, `B. liquidaciones letra B.pdf`, etc.) — y no
+había archivo de la letra V. No es un bug de lectura, es un documento que
+falta subir. **Antes de auditar lectura/OCR sobre un `SIN_LIQUIDACION` (o
+cualquier módulo con documentos repartidos por letra), agrupar los
+faltantes por letra primero** — si una letra completa explica un bloque
+grande de los faltantes, es más rápido confirmar/descartar eso que auditar
+página por página.
+
+**Mejora de proceso pendiente, sugerida al usuario, no implementada
+todavía**: al cargar los archivos de Liquidaciones (o cualquier slot
+repartido por letra), calcular qué letras de apellido hacen falta según
+`va_lhFiltered` (activos) y avisar ANTES de correr toda la validación si
+alguna letra tiene 0 archivos cargados — hoy este gap solo se descubre
+auditando el Excel exportado después de una corrida completa.
+
+## Firma física de Liquidaciones tenía el mismo bug de raíz que Contratos — substring exacto en vez de palabra individual
+
+Mismo Excel real: 137 de 330 activos (41.5%) salían `SIN_FIRMA`. El
+detector de tinta física de Liquidaciones (bloque `esFirmaFisica`, DENTRO
+de `va_validarLiquidaciones`, no confundir con
+`va_detectarFirmaFisicaPorEtiqueta` de Contratos) usaba una zona FIJA
+(60%-82% del alto de página) — a diferencia de Contratos, que YA usaba
+anclaje por etiqueta. Se auditó la letra A completa (8 páginas reales, con
+nombre por página vía OCR + cruce contra el caso real de cada uno en el
+Excel): 3 casos reales (Acuña Valencia, Aguirre Armijo, Aguirre Saavedra)
+tenían tinta real de sobra (2.3%-4.8%, muy por encima del umbral 0.3%) en
+esa misma zona fija — la zona en sí no era el problema.
+
+La causa real: el gate que HABILITA el chequeo de tinta (`esLiqEscaneada`)
+exigía el substring EXACTO `"FIRMA CONFORME"` en el texto ya unido — si el
+OCR real separa/corrompe esas 2 palabras (aunque cada una individualmente
+se reconozca bien), el chequeo de tinta ni se intenta. Mismo patrón de raíz
+que el caso de Yucra Geronimo en Contratos (la firma tapaba la etiqueta
+impresa y el substring exacto fallaba) — portado el mismo fix acá: (1) el
+gate ahora también acepta si cualquier PALABRA individual del OCR
+(`ocrWordsLiq`, capturada del mismo `recognize()` que ya se llamaba, antes
+solo se usaba `.text`) dice "CONFORME"; (2) la zona de tinta ya no es un
+porcentaje fijo — se ancla a la posición real de la etiqueta detectada por
+OCR, traducida por FRACCIÓN de altura entre el canvas del OCR (escala 3.0)
+y el canvas del chequeo de tinta (escala 1.0/1.5, para no encarecer el
+render) — cae al rango fijo de siempre solo si no se detectó ninguna
+etiqueta. Validado con réplica fiel en Python contra las 8 páginas reales
+de letra A, mismas escalas exactas que usa el código: los 3 casos rotos
+ahora detectan firma=True, los que ya andaban bien siguen andando bien.
+
+**Patrón para la próxima vez**: cualquier detector de firma física nuevo
+(o ya existente) que dependa de un substring exacto en texto OCR ya unido,
+o de un porcentaje fijo de página, es candidato a este mismo bug — preferí
+desde el inicio anclar por PALABRA individual (con su propio bbox) sobre
+un texto ya reconstruido/unido.
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
