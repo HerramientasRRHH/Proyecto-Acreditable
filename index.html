@@ -11598,6 +11598,12 @@ async function va_validarLiquidaciones(){
         const lines=sortedYs.map(y=>lineMap.get(y).sort((a,b)=>a.x-b.x).map(i=>i.str).join(' '));
         let txt=lines.join('\n');
         let textoUtil=txt.replace(/\s/g,'').length;
+        // ocrWordsLiq/ocrCanvasHeightLiq: palabras con bbox del OCR de esta
+        // página (si hubo) + alto del canvas en que se leyeron -- usado más
+        // abajo para anclar la zona de tinta de "FIRMA CONFORME" por
+        // POSICIÓN de palabra en vez de exigir el substring exacto en el
+        // texto ya unido (ver comentario en el bloque de firma física).
+        let ocrWordsLiq=[],ocrCanvasHeightLiq=0;
         // Fix 2: OCR si página escaneada (poco texto extractable)
         if(textoUtil<40&&ren_ocrWorker){
           try{
@@ -11606,8 +11612,12 @@ async function va_validarLiquidaciones(){
             canvas.width=vp.width;canvas.height=vp.height;
             await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
             const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
-            const {data:{text}}=await ren_ocrWorker.recognize(blob);
-            if(text&&text.replace(/\s/g,'').length>20){txt=text;textoUtil=txt.replace(/\s/g,'').length;}
+            const {data:ocrDataLiq}=await ren_ocrWorker.recognize(blob);
+            const text=ocrDataLiq.text;
+            if(text&&text.replace(/\s/g,'').length>20){
+              txt=text;textoUtil=txt.replace(/\s/g,'').length;
+              ocrWordsLiq=ocrDataLiq.words||[];ocrCanvasHeightLiq=canvas.height;
+            }
           }catch(ocrErr){console.warn('OCR p'+p+':',ocrErr);}
         }
         // ╔═══════════════════════════════════════════════════════════════════════╗
@@ -11709,7 +11719,16 @@ async function va_validarLiquidaciones(){
         if (txtLen >= 50) {
           if (tieneMarcadorLiq && !esOtroDocText) {
             esLiquidacion = true;
-            if (/FIRMA\s+CONFORME/i.test(txt) && imgCount >= 1 && tcItems < 5) {
+            // Caso real (Antofagasta, letra A): 3 trabajadores con tinta
+            // real y suficiente en la zona de firma (Acuña Valencia,
+            // Aguirre Armijo, Aguirre Saavedra) salían "sin firma" porque
+            // el OCR real separa/corrompe "FIRMA" y "CONFORME" lo
+            // suficiente para que el substring exacto no matchee en el
+            // texto ya unido, aunque cada palabra por separado (con su
+            // bbox) sí se reconoce bien -- por eso también se acepta si
+            // CUALQUIER palabra individual del OCR dice "CONFORME" (ver
+            // skill acreditable-review).
+            if ((/FIRMA\s+CONFORME/i.test(txt) || ocrWordsLiq.some(function(w2){return /CONFORME/i.test((w2.text||'').trim());})) && imgCount >= 1 && tcItems < 5) {
               esLiqFisica = true;
               esLiqEscaneada = true;
             }
@@ -11851,7 +11870,17 @@ async function va_validarLiquidaciones(){
           (/firma.{0,20}emplead/i.test(txt)&&/firma.{0,20}trabajad/i.test(txt));
 
         // ── FIRMA FÍSICA: solo en páginas de LIQUIDACIÓN (no libros, no licencias) ──
-        // Zona: y=60%-82% del alto, x=5%-65% del ancho
+        // Zona: ancla dinámica por la posición real de la etiqueta
+        // "CONFORME"/"FIRMA" (misma técnica ya validada en Contratos,
+        // va_detectarFirmaFisicaPorEtiqueta) en vez de un porcentaje fijo
+        // del alto de página. Motivo real: la tabla de haberes/descuentos
+        // tiene largo variable por trabajador (más o menos bonos/descuentos)
+        // así que el bloque de firma se corre hacia arriba o abajo — un
+        // rango fijo puede no cubrirlo. La posición de la etiqueta se
+        // detectó en el OCR de más arriba (`ocrWordsLiq`, a escala 3.0);
+        // como este canvas puede estar a otra escala, se traduce por
+        // FRACCIÓN de altura (invariante a la escala — ambos renders son la
+        // misma página) en vez de convertir píxeles directamente.
         // Threshold bajo a propósito: preferimos marcar firmado ante cualquier
         // mancha/trazo visible (falso positivo) y que la persona lo revise y
         // corrija a mano si no es una firma real, antes que perdernos una
@@ -11861,8 +11890,25 @@ async function va_validarLiquidaciones(){
         let firmaFisicaImgData=null;
         if(esLiquidacion&&esLiqEscaneada&&canvas&&ctx){
           try{
-            const fy0=Math.round(renderedH*0.60);
-            const fy1=Math.round(renderedH*0.82);
+            let etiquetaFirmaLiq=null;
+            for(const w2 of ocrWordsLiq){
+              const t2=(w2.text||'').trim();
+              if(!t2||!/CONFORME|FIRMA/i.test(t2))continue;
+              const bbox2=w2.bbox||{};
+              if(!etiquetaFirmaLiq||bbox2.y0>=etiquetaFirmaLiq.y0)etiquetaFirmaLiq=bbox2;
+            }
+            let fy0,fy1;
+            if(etiquetaFirmaLiq&&ocrCanvasHeightLiq){
+              const fracY=etiquetaFirmaLiq.y0/ocrCanvasHeightLiq;
+              fy1=Math.min(renderedH,Math.round(renderedH*fracY)+5);
+              fy0=Math.max(0,fy1-Math.round(renderedH*0.12));
+            }else{
+              // Sin etiqueta detectada por OCR (ej. página con muy poco
+              // texto legible): cae al rango fijo de siempre, mejor que no
+              // revisar nada.
+              fy0=Math.round(renderedH*0.60);
+              fy1=Math.round(renderedH*0.82);
+            }
             const fx1=Math.round(renderedW*0.65);
             const fZone=ctx.getImageData(0,fy0,fx1,fy1-fy0);
             let darkPx=0;
