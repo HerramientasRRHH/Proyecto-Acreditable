@@ -11559,7 +11559,8 @@ async function va_validarLiquidaciones(){
   // Finiquitos/Licencias/Exenciones/F30/F30-1/PreviRed — todos dependen del
   // worker único global y no deben competir con un pool vivo. Esa es la
   // salvaguarda que faltó la primera vez.
-  let archivosLiqIniciados=0,archivosLiqEnCurso=0;
+  let archivosLiqIniciados=0,archivosLiqEnCurso=0,archivosLiqCompletados=0;
+  const totalArchivosLiq=dd.buffers.length;
   async function procesarArchivoLiquidacion(buf,ocrWorkerAsignado){
     const ren_ocrWorker=ocrWorkerAsignado; // shadow local: todo el cuerpo de abajo usa el worker que le tocó a ESTE archivo
     archivosLiqIniciados++;archivosLiqEnCurso++;
@@ -11571,9 +11572,16 @@ async function va_validarLiquidaciones(){
       let currentRut=null;
       let enContratoHasta=0; // última página (num) que todavía cuenta como parte de un Contrato en curso
       for(let p=1;p<=pdf.numPages;p++){
-        // Progreso: 6-34% repartido entre todas las páginas de todos los buffers
-        const progPct=Math.round(6+(p/pdf.numPages)*26);
-        if(p%5===0||p===1) va_setProg(Math.min(progPct,34),`📄 Liquidaciones: pág ${p}/${pdf.numPages}`);
+        // Con varios archivos corriendo en paralelo, esta línea de progreso
+        // la pisan turnándose los 4 workers — por eso ahora dice explícito
+        // en qué archivo (de cuántos) y qué página va ESE archivo en
+        // particular, en vez de solo "pág X/Y" (que antes de paralelizar
+        // alcanzaba porque solo corría un archivo a la vez; ahora, sin este
+        // dato, un usuario que ve el número dejar de cambiar por un rato no
+        // puede distinguir "se colgó" de "le tocó a otro archivo más chico
+        // terminar primero" — bug real reportado por el usuario).
+        const progPct=Math.round(6+((archivosLiqCompletados+p/pdf.numPages)/totalArchivosLiq)*26);
+        if(p%5===0||p===1) va_setProg(Math.min(progPct,34),`📄 Liquidaciones: archivo ${miArchivoLiqNum}/${totalArchivosLiq} (${archivosLiqEnCurso} en paralelo) · pág ${p}/${pdf.numPages}`);
         const page=await pdf.getPage(p);const tc=await page.getTextContent();
         // Fix 2+3: reconstruir texto con líneas (va_textoConLineas) igual que Módulo 6
         const items=[...tc.items].filter(it=>it.str&&it.str.trim());
@@ -12170,8 +12178,10 @@ async function va_validarLiquidaciones(){
       }
     }catch(e){console.error('Liq error:',e);}
     }finally{
-      archivosLiqEnCurso--;
+      archivosLiqEnCurso--;archivosLiqCompletados++;
       console.log(`[Liquidaciones] archivo ${miArchivoLiqNum} terminado — quedan ${archivosLiqEnCurso} en curso`);
+      va_setProg(Math.min(6+Math.round(archivosLiqCompletados/totalArchivosLiq*26),34),
+        `📄 Liquidaciones: ${archivosLiqCompletados}/${totalArchivosLiq} archivos completados`);
     }
   }
   va_setProg(6,'⏳ Cargando OCR (paralelo)…');
