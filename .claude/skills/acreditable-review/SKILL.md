@@ -1452,6 +1452,60 @@ o de un porcentaje fijo de página, es candidato a este mismo bug — preferí
 desde el inicio anclar por PALABRA individual (con su propio bbox) sobre
 un texto ya reconstruido/unido.
 
+## "58 sin liquidación" era 3 cosas distintas — auditoría completa de los 41 no-V
+
+Después de confirmar que 17/58 eran la letra V faltante, el usuario pidió
+explícitamente "no asumas, hacé vos la lectura" para los 41 restantes.
+Auditoría completa (301 páginas reales, los 12 archivos necesarios,
+réplica fiel en Python corrida en background) dio:
+
+- **29/41**: el apellido SÍ aparece legible en el documento real (la
+  página existe) pero el RUT específicamente no matcheaba contra la
+  nómina — mismo patrón "1 dígito mal leído" ya documentado antes, pero a
+  mucho mayor escala de la que se había visto. Causa raíz encontrada con
+  un caso real (Astete Gutierrez, RUT real ...630-**0**, la página dice
+  "RUT: ...630-**2**"): el rescate por Levenshtein (`va_matchRutCercano`)
+  YA existía y funciona bien, pero su ÚNICA fuente de candidatos crudos
+  (`va_findAllRutsRaw`) solo implementaba los Patrones 1/2 de
+  `va_findAllRuts` (puntuación tipo "NN.NNN.NNN-N") — en la página real,
+  ni siquiera el RUT del EMPLEADOR (que aparece 2 veces en la misma
+  página) calzaba con esa puntuación esperada (OCR real: "87.645. 000-3"
+  y "+7.645.000-3", ninguno de los dos matchea el patrón). Fix:
+  `va_findAllRutsRaw` ahora también incluye el Patrón 4 (ancla en la
+  etiqueta impresa "RUT:", mucho más tolerante al ruido de puntuación).
+  Validado en el navegador real con 2 casos independientes de letras
+  distintas (Astete en A, Salinas Menchaca en S).
+- **9/41**: el RUT SÍ se encuentra con el regex normal (con checksum) en
+  el archivo completo — pero la persona sigue saliendo SIN_LIQUIDACION en
+  producción. Caso real confirmado visualmente: Fredes Jeraldo Ana Maria
+  (archivo "E y F", página 22 de 22, liquidación real, firmada, RUT
+  perfectamente legible "5.859.211-0"). **No resuelto** — esto no es un
+  problema de extracción de RUT (ya se confirmó que el RUT se lee bien),
+  es más probablemente un problema de ATRIBUCIÓN página↔trabajador dentro
+  del loop de `currentRut`, o una diferencia real entre Tesseract.js (el
+  motor real) y pytesseract (usado para auditar) que no se pudo reproducir
+  en este sandbox. Sospecha sin confirmar, pendiente si se repite después
+  del fix del RUT.
+- **3/41**: genuinamente no se encontró ni RUT ni apellido en el texto del
+  archivo completo (Duran Ragua, Sevillano Zelada, Landazuri Cuero) — sin
+  confirmar todavía si es una ausencia real o una diferencia de escritura
+  del nombre entre el LH y el documento (ej. apellido materno distinto,
+  nombre de casada vs soltera). Pendiente si se pide.
+
+**Archivos de letras mixtas ("E y F", "Y , Z")**: se inspeccionaron
+visualmente — la estructura en sí no tiene nada roto (cada trabajador
+sigue con su propia liquidación de 1 página, sin importar si es de la
+letra E o F dentro del mismo archivo). Lo que SÍ se confirmó: estos
+archivos combinados intercalan además OTROS tipos de documento
+(certificados de pago BancoEstado — comprobantes de depósito — mezclados
+entre las liquidaciones, de personas que a veces ni siquiera están en el
+tramo alfabético del archivo, ej. "Zarate Salazar" apareciendo en el
+archivo "Y , Z" junto a los Y/Z reales). El código YA maneja esto
+(`esComprobanteText`/`tieneComprobante`, vía RUT propio en cada
+comprobante) — no se encontró un bug estructural nuevo específico de
+archivos combinados, más allá de los 2 ya documentados arriba (que
+también aparecen en archivos de una sola letra).
+
 ## Contexto del proyecto (por si hace falta reconstruirlo)
 
 - Repo: `Proyecto-Acreditable` en GitHub (`HerramientasRRHH/Proyecto-Acreditable`),
