@@ -1301,16 +1301,49 @@ diagnóstico dos veces:
    `Total Haberes Imponibles=0` ese mes (`SIN_ACTIVIDAD`, no contaba como
    faltante) — 16 trabajadores activos reales quedaban sin chequear. Se
    sacó la excepción.
-8. **Firma física en Anexos de Contrato — pendiente sin resolver**: el
-   usuario reportó Anexos marcados "sin firma de trabajador" que, al
-   revisar la página real (PyMuPDF → PNG, mirado directamente), SÍ tenían
-   firma manuscrita + timbre de empresa. La verificación en vivo contra el
-   pipeline real (Tesseract.js + `va_detectarFirmaFisicaPorEtiqueta`) no
-   pudo completarse en el sandbox (>10 min sin terminar 2 páginas de OCR) —
-   **queda sin confirmar la causa exacta**, no se aplicó ningún fix a
-   ciegas. Antes de tocar esa función, reproducir en un navegador real y
-   mirar qué `words`/bbox devuelve Tesseract.js sobre el timbre circular
-   (texto curvo, más difícil de leer que una firma lineal).
+8. **Firma física en Anexos de Contrato — dos causas reales, una arreglada,
+   una documentada sin fix**. El intento de verificar en vivo contra
+   Tesseract.js real no terminó en el sandbox (>10 min), así que se cambió
+   de estrategia: `pytesseract.image_to_data` (rápido en este sandbox) da
+   la MISMA estructura de datos que `data.words` de Tesseract.js (texto +
+   bbox por palabra), así que se pudo replicar `va_detectarFirmaFisicaPorEtiqueta`
+   exacta en Python contra las páginas reales de los 3 trabajadores
+   reportados, después de confirmar visualmente (PyMuPDF → PNG, mirado
+   directamente) que las 3 SÍ tenían firma real.
+   - **Causa 1 (arreglada)**: caso real de Rojas Leyton Priscilla Andrea —
+     la firma va DEBAJO de la línea del RUT, no arriba de la etiqueta
+     "FIRMA DEL TRABAJADOR" (layout distinto al resto de los trabajadores
+     del mismo archivo). El algoritmo solo miraba arriba de la etiqueta —
+     zona vacía, 0.034% de tinta medida. Fix: `va_detectarFirmaFisicaPorEtiqueta`
+     ahora también busca la línea "Rut" más cercana debajo de la etiqueta y
+     mira la tinta debajo de ESA (no debajo de la etiqueta directamente —
+     eso daría falso positivo siempre, ahí está impreso el RUT). Umbral más
+     alto para este camino (3% vs 1% del camino normal) porque el borde
+     punteado de la caja mete ~2.4% de tinta de fondo aunque no haya firma
+     real — medido en 2 páginas reales sí firmadas por el camino normal.
+     Validado con síntesis en el navegador real (no solo réplica Python):
+     detecta el patrón de Rojas, sigue detectando el patrón normal, y sigue
+     rechazando correctamente una caja realmente vacía (sin tinta en
+     ningún lado) — los 3 casos verificados en consola contra
+     `va_detectarFirmaFisicaPorEtiqueta` real.
+   - **Causa 2 (documentada, sin fix)**: caso real de Yucra Geronimo
+     Ruperto — el algoritmo depende de que OCR lea la palabra "TRABAJADOR"
+     de la etiqueta para anclar la zona a revisar; en esta página la firma
+     manuscrita cruza/tapa justo la etiqueta impresa y Tesseract simplemente
+     NO la reconoce como ninguna palabra (0 apariciones de "trabajador" en
+     mayúsculas en toda la página, solo 4 menciones en minúscula dentro del
+     CUERPO del contrato — "en poder del trabajador", "liga al trabajador",
+     etc). El algoritmo cae de vuelta a la ÚLTIMA mención que sí pudo leer
+     (texto de una cláusula, nada que ver con la firma) y mide tinta en el
+     lugar equivocado. No se intentó un fix — cualquier heurística de
+     posición (ej. "solo mirar el 20% inferior de la página") seguiría
+     fallando acá porque la mención errónea de "trabajador" TAMBIÉN cae en
+     esa franja inferior (cláusula QUINTO, justo antes del bloque de firma).
+     La salida real para este caso ya existe en el código: si la detección
+     física falla, `va_validarContratosAntofagasta` cae a IA visual
+     (`iaKeyOk` configurada) — confirmar con el usuario si tenía la key de
+     IA activa en la corrida donde vio este caso, antes de asumir que sigue
+     roto.
 
 ## Paralelización de Liquidaciones (segundo intento, con la salvaguarda)
 
