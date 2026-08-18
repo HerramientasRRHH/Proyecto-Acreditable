@@ -29,7 +29,12 @@ no_resueltos = []
 for archivo, casos in casos_por_archivo.items():
     path = os.path.join(base, archivo)
     print(f'=== procesando {archivo} ===', flush=True)
-    txt, total = get_pdf_text_ocr(path, max_pages_ocr=100, verbose=False)
+    # scale=3.0: va_validarLiquidaciones hace su PROPIO OCR inline a esta
+    # escala (no usa la va_getPdfTextOCR compartida, que por defecto es
+    # 2.5) -- confirmado que a 2.5 el caso real de Correa pierde el dígito
+    # verificador por completo, y a 3.0 sí aparece (aunque mal leído,
+    # rescatable). Hay que auditar a la MISMA escala que usa producción.
+    txt, total = get_pdf_text_ocr(path, max_pages_ocr=100, scale=3.0, verbose=False)
     raw = find_all_ruts_raw(txt)
     for rut, nombre in casos:
         rn = norm_rut(rut)

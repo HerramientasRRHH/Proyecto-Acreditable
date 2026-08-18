@@ -1560,3 +1560,43 @@ hace para rotación) con casos de atribución página-trabajador distintos.
     (~línea 10886+) — matching de nombres por tokens.
   - `va_clasificar()` (~línea 12082+) — reglas de qué documentos exige cada
     caso (Contrato/CI/Antecedentes/Libro/Licencia Médica).
+
+## "No lee bien" en Licencias Médicas: antes de tocar código, verificar qué archivos se subieron esa corrida
+
+El usuario reportó Licencias Médicas "no leyendo bien todas" en una corrida
+real de Antofagasta (export `Validacion_Acreditable_Antofagasta_Base
+única_2026-08-18.xlsx`, hoja "Licencias": 49 con licencia en LH, 30
+cubiertos, 19 faltantes). Antes de sospechar del código, se cruzó cada uno
+de los 19 RUT faltantes contra `Listado de licencia medica.oxps` (el
+listado tabular limpio, ya arreglado y validado en la sesión anterior —
+commit `fe2eb5d`, 68/68 filas resueltas) replicando en Python la MISMA
+lógica de extracción que usa `va_procesarFilasOxpsLicencia` (incluye el
+recorte de dígito-de-fila-pegado con desambiguación por DV).
+
+Resultado: **18 de los 19 faltantes SÍ están correctamente listados y
+legibles en el `.oxps`** — incluyendo el caso exacto que el commit `fe2eb5d`
+usa como ejemplo documentado (Alballay Villagran Pedro). El fix del `.oxps`
+funciona; lo que pasó es que **esa corrida no incluyó el archivo `.oxps`
+entre los documentos subidos al slot de Licencias** — solo `licencia
+medica.pdf` (75 páginas escaneadas) y/o `carta lm.pdf`. No era un bug de
+lectura, era un archivo de entrada faltante para esa corrida puntual.
+
+El 1 caso restante (Pelaez Pelaez Ana Leonor, 6.573.181-9, ausente del
+`.oxps`) SÍ tiene un comprobante individual real dentro de `licencia
+medica.pdf` (formulario DIAT/DIEP, texto OCR: "ANA LEONOR PELAEZ PELAEZ 3
+6573181-9"). Se replicó la extracción con los mismos parámetros que usa
+`va_validarLicenciasMedicas` en producción (OCR a escala 2.5,
+`va_ocrPaginaMejorRotacion` con scoring por fecha/palabra clave) y
+`va_findAllRuts` sí encuentra ese RUT en el texto — así que en teoría el
+código actual ya debería resolverlo. No se pudo confirmar en el navegador
+real (Tesseract.js) por la lentitud del sandbox; si tras resubir con el
+`.oxps` incluido este caso puntual sigue fallando, ahí sí vale la pena un
+test en navegador real acotado a esa sola página antes de sospechar del
+regex.
+
+**Lección general**: cuando un módulo "no lee bien" en una corrida real,
+antes de re-auditar el código, preguntar/confirmar qué archivos exactos se
+subieron esa vez — sobre todo en módulos que aceptan más de un tipo de
+archivo por slot (PDF + `.oxps`). Un archivo omitido produce el mismo
+síntoma ("cubre menos de lo esperado") que un bug real de lectura, pero el
+fix es "avisar al usuario que falta adjuntar X", no tocar código.
