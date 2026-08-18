@@ -12266,6 +12266,11 @@ async function va_validarFiniquitos(){
   const sinRespaldo=finiqLH.filter(x=>ruts.has(x.rutNorm)&&!legalizados.has(x.rutNorm)&&!respaldados.has(x.rutNorm));
   const extras=[...ruts].filter(r=>!va_lhFiltered.some(x=>x.rutNorm===r&&x.termino));
   // Detalle por trabajador (para la tabla completa: notariado / tipo de respaldo / sin nada)
+  // Pedido explícito del usuario: un desvinculado sigue necesitando su
+  // Liquidación de Sueldo del mes (por los días trabajados antes de la
+  // desvinculación) ADEMÁS del Finiquito — son dos documentos distintos, no
+  // uno reemplaza al otro. Se cruza acá contra va_liqMap (ya poblado por
+  // va_validarLiquidaciones, que corre antes en va_ejecutar).
   const detalle=finiqLH.map(x=>{
     let estado,detalleTxt;
     if(!ruts.has(x.rutNorm)){estado='faltante';detalleTxt='Sin finiquito en el PDF';}
@@ -12273,14 +12278,17 @@ async function va_validarFiniquitos(){
     else if(respaldados.has(x.rutNorm)){estado='respaldo';detalleTxt='No legalizado, pero con '+(tipoPorRut.get(x.rutNorm)||'respaldo alternativo');}
     else if(cartaPendienteRuts.has(x.rutNorm)){estado='cartaPendiente';detalleTxt='No legalizado — según carta a la Municipalidad, no se ha acercado a notaría a firmar (pendiente)';}
     else{estado='sinrespaldo';detalleTxt='No legalizado y sin respaldo alternativo detectado';}
-    return{rut:x.rut,nombre:x.nombre,estado,detalle:detalleTxt};
+    const tieneLiq=!!(va_liqMap.get(x.rutNorm)&&va_liqMap.get(x.rutNorm).tieneLiq);
+    return{rut:x.rut,nombre:x.nombre,estado,detalle:detalleTxt,tieneLiq};
   });
+  const sinLiqFiniq=detalle.filter(d=>!d.tieneLiq);
   va_docResults['finiq']={nombre:'3.3 Finiquitos',cargado:true,totalLH:finiqLH.length,cubiertos:cubiertos.length,
     faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre})),extras:extras.length,
     legalizados:legalizados.size,respaldados:respaldados.size,
     sinRespaldo:sinRespaldo.map(x=>({rut:x.rut,nombre:x.nombre})),
+    sinLiquidacion:sinLiqFiniq.map(x=>({rut:x.rut,nombre:x.nombre})),
     detalle,
-    estado:(faltantes.length===0&&sinRespaldo.length===0)?'✅':((faltantes.length+sinRespaldo.length)<=2?'⚠':'❌')};
+    estado:(faltantes.length===0&&sinRespaldo.length===0&&sinLiqFiniq.length===0)?'✅':((faltantes.length+sinRespaldo.length+sinLiqFiniq.length)<=2?'⚠':'❌')};
   return{cargado:true,ruts,legalizados,respaldados};
 }
 
@@ -12718,10 +12726,18 @@ async function va_validarGenerico(docId){
 function va_clasificar(t,liq){
   const r={rut:t.rut,rutNorm:t.rutNorm,nombre:t.nombre,dias:t.dias,diasLic:t.diasLic,caso:'',estado:'',msg:'',docsReq:[],docsOk:[],docsFalt:[]};
 
-  // FINIQUITADO: va directo a su sección, NO al resumen de liquidaciones
+  // FINIQUITADO: va directo a su sección (pestaña Finiquitos), NO al
+  // resumen/tabla de liquidaciones. Pedido explícito del usuario: sigue
+  // necesitando su Liquidación de Sueldo del mes (además del Finiquito) —
+  // uno no reemplaza al otro, así que se chequea acá también aunque el
+  // detalle completo (respaldo/notaría) vive en va_validarFiniquitos.
   if(t.termino){
-    r.caso='FINIQUITADO';r.estado='⚠';r.msg='Tiene Fecha Término en LH';
-    r.docsReq.push('Finiquito');return r;
+    r.caso='FINIQUITADO';
+    r.docsReq.push('Finiquito','Liquidación');
+    const tieneLiqFiniq=!!(liq&&liq.tieneLiq);
+    if(tieneLiqFiniq){r.docsOk.push('Liquidación');r.estado='⚠';r.msg='Tiene Fecha Término en LH';}
+    else{r.docsFalt.push('Liquidación');r.estado='❌';r.msg='Tiene Fecha Término en LH — sin Liquidación de Sueldo en PDF';}
+    return r;
   }
 
   // Sin liquidación en PDF — pedido explícito del usuario: TODOS los que
@@ -14377,7 +14393,11 @@ function va_renderResultados(){
   const resultadosLiq=va_resultados.filter(x=>x.caso!=='FINIQUITADO');
   const sinFirma=resultadosLiq.filter(x=>x.caso==='SIN_FIRMA').length;
   const menos30=va_resultados.filter(x=>x.caso==='MENOS_30').length;
-  const sinLiq=va_resultados.filter(x=>x.caso==='SIN_LIQUIDACION').length;
+  // Incluye tanto activos sin liquidación (SIN_LIQUIDACION) como
+  // finiquitados sin su liquidación del mes (docsFalt incluye
+  // 'Liquidación') — pedido explícito del usuario: TODOS los del LH deben
+  // tener liquidación, sin excepción para desvinculados.
+  const sinLiq=va_resultados.filter(x=>x.caso==='SIN_LIQUIDACION'||(x.caso==='FINIQUITADO'&&x.docsFalt.includes('Liquidación'))).length;
   const finiq=va_resultados.filter(x=>x.caso==='FINIQUITADO').length;
   // Veredicto
   let vTxt,vColor,vBg;
@@ -14444,8 +14464,8 @@ function va_renderLiq(){
     .sort((a,b) => (a.nombre||'').localeCompare(b.nombre||'','es',{sensitivity:'base'}));
   const menos30list = sorted.filter(x => x.caso==='MENOS_30');
   let h = `<div style="margin-bottom:10px;font-size:.78rem;color:#555">
-    <strong>${va_liqMap.size}</strong> liquidaciones detectadas en PDF — <strong>${va_lhFiltered.filter(x=>!x.termino).length}</strong> esperadas en LH (todos los que no tienen Fecha Término, no solo los con haberes)
-    · <span style="color:#888">ordenado alfabéticamente</span>
+    <strong>${va_liqMap.size}</strong> liquidaciones detectadas en PDF — <strong>${va_lhFiltered.length}</strong> esperadas en LH en total (TODOS los del período, sin excepción — incluye los ${va_lhFiltered.filter(x=>x.termino).length} con Fecha Término, cuya Liquidación se revisa en la pestaña Finiquitos junto a su Finiquito)
+    · <span style="color:#888">esta tabla de abajo solo lista a los ${va_lhFiltered.filter(x=>!x.termino).length} activos — ordenado alfabéticamente</span>
   </div>`;
   if(va_iaDiag){
     h += va_iaDiag.configurada
@@ -14612,12 +14632,20 @@ function va_quitarFirmaManual(rutNorm){
 function va_renderFiniq(){
   const d=va_docResults['finiq'];
   if(!d||!d.cargado) return '<div class="ch-empty"><div class="ico">📑</div>No se cargó PDF de finiquitos</div>';
-  let h=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">
+  let h=`<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px">
     <div class="ch-kpi"><div class="v">${d.totalLH}</div><div class="l">Finiquitados LH</div></div>
     <div class="ch-kpi ok"><div class="v">${d.cubiertos}</div><div class="l">Cubiertos</div></div>
     <div class="ch-kpi${d.faltantes.length?' err':''}"><div class="v">${d.faltantes.length}</div><div class="l">Faltantes</div></div>
     <div class="ch-kpi"><div class="v">${d.legalizados||0}</div><div class="l">Legalizados</div></div>
-  </div>`;
+    <div class="ch-kpi${(d.sinLiquidacion&&d.sinLiquidacion.length)?' err':''}"><div class="v">${d.sinLiquidacion?d.sinLiquidacion.length:0}</div><div class="l">Sin Liquidación</div></div>
+  </div>
+  <div style="background:#eaf6ef;border-radius:7px;padding:8px 14px;font-size:.76rem;margin-bottom:10px;color:#375">ℹ Un desvinculado necesita AMBOS documentos: Finiquito Y Liquidación de Sueldo del mes (por los días trabajados antes de la desvinculación) — uno no reemplaza al otro.</div>`;
+  if(d.sinLiquidacion&&d.sinLiquidacion.length){
+    h+='<div class="ch-section-title" style="color:#c0392b">⚠ Finiquitados sin Liquidación de Sueldo en el PDF de Liquidaciones</div>';
+    h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th></tr></thead><tbody>';
+    [...d.sinLiquidacion].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{h+=`<tr><td>${f.rut}</td><td>${f.nombre}</td></tr>`;});
+    h+='</tbody></table>';
+  }
   if(d.faltantes.length){
     h+='<div class="ch-section-title" style="color:#c0392b">⚠ Finiquitados en LH sin finiquito en PDF</div>';
     h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th></tr></thead><tbody>';
@@ -14627,9 +14655,9 @@ function va_renderFiniq(){
   if(d.detalle&&d.detalle.length){
     const iconos={legalizado:'✅',respaldo:'✅',sinrespaldo:'⚠',cartaPendiente:'⚠',faltante:'❌'};
     h+='<div class="ch-section-title" style="margin-top:16px">📋 Detalle por trabajador — notariado / tipo de respaldo</div>';
-    h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Detalle</th></tr></thead><tbody>';
+    h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Detalle</th><th>Liquidación</th></tr></thead><tbody>';
     [...d.detalle].sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es')).forEach(f=>{
-      h+=`<tr><td>${iconos[f.estado]||''}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="font-size:.72rem">${f.detalle}</td></tr>`;
+      h+=`<tr><td>${iconos[f.estado]||''}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="font-size:.72rem">${f.detalle}</td><td style="font-size:.72rem">${f.tieneLiq?'✅':'❌ falta'}</td></tr>`;
     });
     h+='</tbody></table>';
   }
