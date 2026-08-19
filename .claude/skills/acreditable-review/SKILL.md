@@ -1873,3 +1873,57 @@ adelante pueda leer con librerías" -- este archivo (FONASA, formato
 consistente y bien etiquetado) es un buen candidato a una extracción 100%
 por regex/estructura sin necesitar IA en absoluto, una vez que los cupos
 de los huecos estén bien calibrados contra suficientes casos reales.
+
+## Segundo bug de días (el del regex solo arreglaba la mitad): la IA leía bien las fechas pero mal la casilla "N° de días" -- había que calcular por rango, no confiar en esa casilla
+
+Después del fix del regex FONASA, el usuario corrió de nuevo: Yañez Iriarte
+(el caso que motivó el fix) ya NO aparecía en "días no coinciden" --
+confirma que el fix funciona en el navegador real. Pero el resto de los
+casos (Vilca Taipe, Pino Lagos, Santana Herrera, Alballay, Perez Carvajal,
+Perez Vargas, Vergara Rojas, Fredes Jeraldo, Rojas Flores, Monroy Monroy)
+seguían casi idénticos.
+
+La diferencia: Yañez se resolvía por OCR barato (usa
+`va_extraerDatosLicencia`, el regex que se arregló). Los demás se resuelven
+por el respaldo de IA (`va_iaLeerLicenciaMedica`) -- una vía de código
+totalmente distinta que el fix del regex nunca tocó. El prompt de la IA le
+pedía tres cosas: `fecha_inicio`, `fecha_termino`, Y `numero_dias` -- este
+último es la MISMA casilla "N° DE DÍAS" que ya sabíamos que el OCR lee mal
+(por eso el fix del regex calcula los días por diferencia de fechas en vez
+de leer esa casilla) -- pero el código que consume la respuesta de la IA
+todavía confiaba directo en `leidoIA.numeroDias` sin ese mismo resguardo.
+Cuando la IA lee bien las dos fechas pero falla en leer bien esa casilla
+puntual (mismo tipo de error, ahora del lado de la IA en vez del OCR), el
+resultado sale `null` o mal, y ese período aporta 0 días -- explica los
+casos que quedaban en exactamente 0 (Fredes Jeraldo, Alballay) pese a que
+el nombre sí matcheaba bien.
+
+**Fix**: en el bloque que arma `datosIA` (~línea 12630 de index.html),
+ahora se calcula `dias` como `(fechaTermino - fechaInicio + 1)` cuando la
+IA devolvió ambas fechas parseables, y solo se cae a `numeroDias` si no se
+pudo. Validado con datos simulados reproduciendo el caso real de Fredes
+Jeraldo (`numeroDias:null`, fechas del `.oxps` real) -- el resultado ahora
+da los 10 días de julio esperados, en vez de 0.
+
+**Mejora pedida explícitamente por el usuario**: quería ver, junto al
+número de días, las fechas de cada período encontrado como observación
+auditable ("cuántos de esos días son del mes que estamos auditando, y si
+hay más de un período, que se vea la suma"). Se agregó
+`va_licMedFechasPorRut` (Map rutNorm → lista de `{inicio,termino,
+diasEnPeriodo}`) y el helper `va_registrarDiasLicencia()` que centraliza
+las 3 vías que antes escribían directo en `va_licMedDiasPorRut` (tabla
+oxps, tabla PDF escaneada, formulario individual) para que todas alimenten
+también este nuevo registro sin duplicar lógica. La tabla "Días que no
+coinciden" (panel y Excel) ahora trae una columna "Observación (períodos
+encontrados)" con cada rango de fechas y cuántos días de ese rango caen en
+el mes auditado -- validado con datos simulados reproduciendo el caso de
+Yañez (2 períodos, 22-06→06-07 y 07-07→05-08, 6+25=31 días, reconstruye
+las fechas exactas desde fechaInicio+dias).
+
+**Metodología reafirmada**: cuando dos vías de código distintas hacen lo
+mismo (leer fecha+días de una licencia), CUALQUIER fix de robustez
+aplicado a una (ej. "calcular por rango, no por casilla") hay que
+replicarlo en la otra explícitamente -- no basta con arreglar el síntoma
+más visible. La pista de que faltaba la segunda mitad del fix fue mirar
+CUÁL caso se arregló solo (Yañez, vía OCR) contra cuáles no (el resto, vía
+IA) y preguntarse por qué la misma clase de fix no aplicaba a ambos.

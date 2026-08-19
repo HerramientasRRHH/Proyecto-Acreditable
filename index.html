@@ -10655,6 +10655,15 @@ const VA_BASES={
 };
 let va_lhAll=[],va_lhFiltered=[],va_baseKey=null,va_sectorKey=null,va_subarea=null,va_licMedRuts=new Set();
 let va_licMedDiasPorRut=new Map(); // rutNorm -> días de licencia que caen en el mes auditado, según el documento
+let va_licMedFechasPorRut=new Map(); // rutNorm -> [{inicio,termino,diasEnPeriodo}, ...] -- un registro por cada período/licencia encontrada, para mostrar como observación auditable (pedido explícito: "al lado tendríamos las fechas en las observaciones")
+function va_registrarDiasLicencia(rutFila,fechaInicio,dias,dEnPeriodo){
+  va_licMedDiasPorRut.set(rutFila,(va_licMedDiasPorRut.get(rutFila)||0)+dEnPeriodo);
+  const fTermino=fechaInicio&&dias?new Date(fechaInicio.getTime()+(dias-1)*86400000):null;
+  const fmt=d=>d?('0'+d.getDate()).slice(-2)+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+d.getFullYear():'?';
+  const lista=va_licMedFechasPorRut.get(rutFila)||[];
+  lista.push({inicio:fmt(fechaInicio),termino:fmt(fTermino),diasEnPeriodo:dEnPeriodo});
+  va_licMedFechasPorRut.set(rutFila,lista);
+}
 let va_docsData={},va_liqMap=new Map(),va_resultados=[],va_docResults={},va_subtabActiva='liq';
 let va_iaDiag=null; // {configurada,paginasOk,paginasError} — diagnóstico de conexión IA, no "uso de tokens"
 // Log detallado de cada lectura con IA + veredicto de matching, para poder
@@ -12445,6 +12454,7 @@ function va_parseFechaDDMMYYYY(s){
 async function va_validarLicenciasMedicas(){
   va_licMedRuts=new Set();
   va_licMedDiasPorRut=new Map();
+  va_licMedFechasPorRut=new Map();
   const dd=va_docsData['licencias'];
   if(!dd||!dd.buffers||!dd.buffers.length){
     va_docResults['licencias']={nombre:'Licencias Médicas',cargado:false,estado:'—'};return;
@@ -12471,7 +12481,7 @@ async function va_validarLicenciasMedicas(){
         const dias=parseInt(fila[5],10);
         if(fechaInicio&&dias){
           const dEnPeriodo=va_diasLicenciaEnPeriodo(fechaInicio,dias,va_periodoMes,va_periodoAnio);
-          if(dEnPeriodo!=null)va_licMedDiasPorRut.set(rutFila,(va_licMedDiasPorRut.get(rutFila)||0)+dEnPeriodo);
+          if(dEnPeriodo!=null)va_registrarDiasLicencia(rutFila,fechaInicio,dias,dEnPeriodo);
         }
       }
     }
@@ -12516,7 +12526,7 @@ async function va_validarLicenciasMedicas(){
         const dias=parseInt(fila[5],10);
         if(fechaInicio&&dias){
           const dEnPeriodo=va_diasLicenciaEnPeriodo(fechaInicio,dias,va_periodoMes,va_periodoAnio);
-          if(dEnPeriodo!=null)va_licMedDiasPorRut.set(rutFila,(va_licMedDiasPorRut.get(rutFila)||0)+dEnPeriodo);
+          if(dEnPeriodo!=null)va_registrarDiasLicencia(rutFila,fechaInicio,dias,dEnPeriodo);
         }
       }
     }
@@ -12627,7 +12637,20 @@ async function va_validarLicenciasMedicas(){
           if(matchIA){
             rutFinal=matchIA.rutNorm;
             va_licMedRuts.add(rutFinal);
-            datosIA={fechaInicio:va_parseFechaDDMMYYYY(r.leidoIA.fechaInicio||''),dias:r.leidoIA.numeroDias};
+            // Calcular días desde el RANGO de fechas (fin-inicio+1), no
+            // confiar en "numeroDias" -- es el mismo campo casilla "N° DE
+            // DÍAS" que ya sabíamos que el OCR lee mal (por eso el fix del
+            // regex calcula por rango en vez de leer esa casilla); la IA
+            // tiene el mismo problema al leer esa casilla puntual aunque
+            // lea bien las dos fechas. Caso real: Fredes Jeraldo y Alballay
+            // (licencias de un solo período) daban 0 días pese a matchear
+            // bien el nombre -- numeroDias venía null/mal leído mientras las
+            // fechas sí eran correctas.
+            const fiIA=va_parseFechaDDMMYYYY(r.leidoIA.fechaInicio||'');
+            const ffIA=va_parseFechaDDMMYYYY(r.leidoIA.fechaTermino||'');
+            let diasIA=r.leidoIA.numeroDias;
+            if(fiIA&&ffIA&&ffIA>=fiIA)diasIA=Math.round((ffIA-fiIA)/(1000*60*60*24))+1;
+            datosIA={fechaInicio:fiIA,dias:diasIA};
           }
         }else if(r.leidoIA){
           va_iaAuditLog.push({modulo:'Licencias Médicas',pagina:p,tipo:'LICENCIA_MEDICA',
@@ -12645,7 +12668,7 @@ async function va_validarLicenciasMedicas(){
         const dEnPeriodo=va_diasLicenciaEnPeriodo(datos.fechaInicio,datos.dias,va_periodoMes,va_periodoAnio);
         if(dEnPeriodo!=null){
           // Si el trabajador tiene varias licencias en el mismo mes, se suman
-          va_licMedDiasPorRut.set(rutFinal,(va_licMedDiasPorRut.get(rutFinal)||0)+dEnPeriodo);
+          va_registrarDiasLicencia(rutFinal,datos.fechaInicio,datos.dias,dEnPeriodo);
         }
       }
     }
@@ -12671,7 +12694,8 @@ async function va_validarLicenciasMedicas(){
     nombre:'Licencias Médicas',cargado:true,
     totalLH:conLicLH.length,cubiertos:cubiertos.length,
     faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre,diasLic:x.diasLic})),
-    diasNoCoinciden:diasNoCoinciden.map(x=>({rut:x.rut,nombre:x.nombre,diasLH:x.diasLic,diasDoc:va_licMedDiasPorRut.get(x.rutNorm)})),
+    diasNoCoinciden:diasNoCoinciden.map(x=>({rut:x.rut,nombre:x.nombre,diasLH:x.diasLic,diasDoc:va_licMedDiasPorRut.get(x.rutNorm),
+      periodos:(va_licMedFechasPorRut.get(x.rutNorm)||[]).map(p=>`${p.inicio} a ${p.termino} (${p.diasEnPeriodo}d)`).join('; ')})),
     paginasIA:paginasIALic,oxpsIncluido,
     estado:(faltantes.length===0&&diasNoCoinciden.length===0)?'✅':((faltantes.length+diasNoCoinciden.length)<=2?'⚠':'❌')
   };
@@ -15028,8 +15052,8 @@ function va_renderLicencias(){
   }else{h+='<div style="color:#16613a;font-size:.82rem;font-weight:600">✅ Todos los documentos de licencia están adjuntos</div>';}
   if((d.diasNoCoinciden||[]).length>0){
     h+='<div class="ch-section-title" style="color:#a07900">⚠ Días que no coinciden con el LH</div>';
-    h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th><th>Días LH</th><th>Días doc</th></tr></thead><tbody>';
-    d.diasNoCoinciden.forEach(f=>{h+=`<tr><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLH}</td><td style="text-align:center">${f.diasDoc}</td></tr>`;});
+    h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th><th>Días LH</th><th>Días doc</th><th>Observación (períodos encontrados)</th></tr></thead><tbody>';
+    d.diasNoCoinciden.forEach(f=>{h+=`<tr><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLH}</td><td style="text-align:center">${f.diasDoc}</td><td style="font-size:.68rem">${f.periodos||'—'}</td></tr>`;});
     h+='</tbody></table>';
   }
   h+=va_renderIAAuditSection('Licencias Médicas');
@@ -15574,8 +15598,8 @@ function va_exportExcel(){
       ['SIN DOCUMENTO ADJUNTO','','']];
     (dLic.faltantes||[]).forEach(f=>{h4b.push([f.rut,f.nombre,`${f.diasLic||0} días`]);});
     if((dLic.diasNoCoinciden||[]).length){
-      h4b.push([],['DÍAS QUE NO COINCIDEN CON EL LH','RUT','Nombre','Días LH','Días doc']);
-      dLic.diasNoCoinciden.forEach(f=>{h4b.push(['',f.rut,f.nombre,f.diasLH,f.diasDoc]);});
+      h4b.push([],['DÍAS QUE NO COINCIDEN CON EL LH','RUT','Nombre','Días LH','Días doc','Observación (períodos encontrados)']);
+      dLic.diasNoCoinciden.forEach(f=>{h4b.push(['',f.rut,f.nombre,f.diasLH,f.diasDoc,f.periodos||'']);});
     }
     const auditLic=(va_iaAuditLog||[]).filter(a=>a.modulo==='Licencias Médicas');
     if(auditLic.length){
