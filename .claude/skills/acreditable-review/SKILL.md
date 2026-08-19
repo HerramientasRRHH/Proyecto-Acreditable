@@ -1973,3 +1973,36 @@ sin ninguno de estos dos problemas (texto nativo, no escaneado, 68/68
 filas ya confirmadas 100% correctas) -- es la vía de máxima cobertura real,
 no una opción secundaria. El banner de "no se detectó el .oxps" debe
 tomarse como el bloqueador #1, no como una advertencia opcional.
+
+## El panel solo mostraba las EXCEPCIONES -- daba la falsa impresión de que se perdía gente que en realidad estaba bien
+
+El usuario, viendo que solo aparecían ~7 filas en el panel pese a que el LH
+tiene ~50 trabajadores con licencia, pidió explícitamente "que APAREZCAN
+TODOS los que tienen licencia médica". El diseño anterior de
+`va_renderLicencias()` solo mostraba dos tablas: "sin documento adjunto"
+(faltantes) y "días que no coinciden" -- cualquier trabajador con TODO bien
+(nombre atribuido, RUT encontrado, días coincidiendo exacto con el LH)
+nunca aparecía en ninguna tabla, solo contaba en el número del KPI
+"Cubiertos". Con ~40 de 50 casos típicamente en ese estado "todo bien", el
+panel visualmente parecía estar "perdiendo" la mayoría de la gente cuando
+en realidad la mayoría SÍ estaba correcta -- un problema de presentación,
+no de lectura.
+
+**Fix**: se agregó `va_docResults['licencias'].detalleCompleto` -- un
+array con los `conLicLH.length` trabajadores (TODOS los que tienen licencia
+en el LH, sin filtrar), cada uno con su estado (✅/⚠/❌), días LH, días
+doc, y observación de períodos. Se renderiza como una tabla nueva
+"📋 Detalle completo" al tope del panel (antes de las tablas de
+excepciones, que se mantienen igual como resumen rápido) y se agregó
+también al Excel como su propia sección. Validado con datos simulados (3
+casos: sin doc, con diferencia, y uno 100% OK) confirmando que el caso
+"OK" -- que antes era invisible -- ahora aparece en la tabla.
+
+**Lección de UX para este tipo de auditoría**: cuando el pedido es "cotejar"
+o "cruzar" contra una nómina completa, mostrar SOLO las excepciones (por
+más que sea lo más "accionable") puede hacer parecer que el sistema está
+fallando mucho más de lo que realmente está fallando -- el usuario no tiene
+forma de distinguir "no veo a Fulano porque está bien" de "no veo a Fulano
+porque se perdió". Siempre que la nómina base es chica/mediana (acá ~50),
+vale la pena mostrar el universo completo con estado por fila, no solo el
+subconjunto con problemas.

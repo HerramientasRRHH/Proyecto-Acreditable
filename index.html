@@ -12708,12 +12708,29 @@ async function va_validarLicenciasMedicas(){
     const d=va_licMedDiasPorRut.get(x.rutNorm);
     return d!=null&&d!==x.diasLic;
   });
+  // Detalle COMPLETO: los ~50 trabajadores con licencia en el LH, uno por
+  // fila, no solo los que tienen algún problema. Pedido explícito del
+  // usuario -- antes el panel solo mostraba faltantes + días-no-coinciden,
+  // así que alguien con TODO bien (la mayoría) nunca aparecía en ninguna
+  // tabla, dando la falsa impresión de que se estaba "perdiendo" gente.
+  const detalleCompleto=conLicLH.map(x=>{
+    const enDoc=va_licMedRuts.has(x.rutNorm);
+    const diasDoc=va_licMedDiasPorRut.get(x.rutNorm);
+    const periodos=(va_licMedFechasPorRut.get(x.rutNorm)||[]).map(p=>`${p.inicio} a ${p.termino} (${p.diasEnPeriodo}d)`).join('; ');
+    let estado;
+    if(!enDoc)estado='❌';
+    else if(diasDoc==null)estado='⚠';
+    else if(diasDoc!==x.diasLic)estado='⚠';
+    else estado='✅';
+    return{rut:x.rut,nombre:x.nombre,diasLH:x.diasLic,diasDoc:diasDoc!=null?diasDoc:(enDoc?'—':''),estado,periodos};
+  }).sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||'','es'));
   va_docResults['licencias']={
     nombre:'Licencias Médicas',cargado:true,
     totalLH:conLicLH.length,cubiertos:cubiertos.length,
     faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre,diasLic:x.diasLic})),
     diasNoCoinciden:diasNoCoinciden.map(x=>({rut:x.rut,nombre:x.nombre,diasLH:x.diasLic,diasDoc:va_licMedDiasPorRut.get(x.rutNorm),
       periodos:(va_licMedFechasPorRut.get(x.rutNorm)||[]).map(p=>`${p.inicio} a ${p.termino} (${p.diasEnPeriodo}d)`).join('; ')})),
+    detalleCompleto,
     paginasIA:paginasIALic,oxpsIncluido,
     paginasSinFecha:va_licMedPaginasSinFecha.slice(),
     estado:(faltantes.length===0&&diasNoCoinciden.length===0)?'✅':((faltantes.length+diasNoCoinciden.length)<=2?'⚠':'❌')
@@ -15063,6 +15080,12 @@ function va_renderLicencias(){
   if(d.paginasIA){
     h+=`<div style="background:#f2f7ff;border:1px solid #cfe0f5;border-radius:7px;padding:6px 12px;margin-bottom:10px;font-size:.72rem;color:#375;display:inline-block">🔧 ${d.paginasIA} página(s) sin RUT reconocible se verificaron con IA visual (ver detalle abajo)</div><br>`;
   }
+  if((d.detalleCompleto||[]).length>0){
+    h+=`<div class="ch-section-title">📋 Detalle completo — los ${d.detalleCompleto.length} trabajadores con licencia en el LH</div>`;
+    h+='<table class="ch-tbl"><thead><tr><th></th><th>RUT</th><th>Nombre</th><th>Días LH</th><th>Días doc</th><th>Observación (períodos encontrados)</th></tr></thead><tbody>';
+    d.detalleCompleto.forEach(f=>{h+=`<tr><td>${f.estado}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLH}</td><td style="text-align:center">${f.diasDoc}</td><td style="font-size:.68rem">${f.periodos||'—'}</td></tr>`;});
+    h+='</tbody></table>';
+  }
   if((d.faltantes||[]).length>0){
     h+='<div class="ch-section-title" style="color:#c0392b">⚠ Licencias sin documento adjunto</div>';
     h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th><th>Días Lic</th></tr></thead><tbody>';
@@ -15620,8 +15643,13 @@ function va_exportExcel(){
   if(dLic&&dLic.cargado){
     const h4b=[['Licencias Médicas — Resultado'],['Con lic. en LH',dLic.totalLH],['Con doc adjunto',dLic.cubiertos],
       ['Listado .oxps adjunto',dLic.oxpsIncluido?'Sí':'No -- los días de personas con varios períodos en el mes pueden salir incompletos'],
-      ['Páginas verificadas con IA',dLic.paginasIA||0],[],
-      ['SIN DOCUMENTO ADJUNTO','','']];
+      ['Páginas verificadas con IA',dLic.paginasIA||0],[]];
+    if((dLic.detalleCompleto||[]).length){
+      h4b.push(['DETALLE COMPLETO — TODOS LOS TRABAJADORES CON LICENCIA EN EL LH','','RUT','Nombre','Días LH','Días doc','Observación (períodos encontrados)']);
+      dLic.detalleCompleto.forEach(f=>{h4b.push(['',f.estado,f.rut,f.nombre,f.diasLH,f.diasDoc,f.periodos||'']);});
+      h4b.push([]);
+    }
+    h4b.push(['SIN DOCUMENTO ADJUNTO','','']);
     (dLic.faltantes||[]).forEach(f=>{h4b.push([f.rut,f.nombre,`${f.diasLic||0} días`]);});
     if((dLic.diasNoCoinciden||[]).length){
       h4b.push([],['DÍAS QUE NO COINCIDEN CON EL LH','RUT','Nombre','Días LH','Días doc','Observación (períodos encontrados)']);
