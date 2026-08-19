@@ -10902,9 +10902,16 @@ function va_extraerDatosLicencia(txt){
     if(mComp){
       const dIni=new Date(parseInt(mComp[3],10),parseInt(mComp[2],10)-1,parseInt(mComp[1],10));
       const dFin=new Date(parseInt(mComp[6],10),parseInt(mComp[5],10)-1,parseInt(mComp[4],10));
-      if(!isNaN(dIni.getTime())&&!isNaN(dFin.getTime())&&dFin>=dIni){
+      const diasRango=Math.round((dFin-dIni)/(1000*60*60*24))+1;
+      // Tope de 200 días -- sin esto, un año mal leído en UNA de las dos
+      // fechas (ej. "2006" en vez de "2026", visto real en el reintento a
+      // escala alta de Pino Lagos) da un rango de miles de días que igual
+      // "por casualidad" atraviesa el mes auditado y cuela un número de
+      // días fantasma (pasó de 24 a 42 días para Pino Lagos). Las licencias
+      // reales de este documento no superan los ~84 días corridos.
+      if(!isNaN(dIni.getTime())&&!isNaN(dFin.getTime())&&dFin>=dIni&&diasRango<=200){
         fechaInicio=dIni;
-        dias=Math.round((dFin-dIni)/(1000*60*60*24))+1;
+        dias=diasRango;
       }
     }
   }
@@ -10923,7 +10930,13 @@ function va_extraerDatosLicencia(txt){
     if(mIniSolo&&mDiasSolo){
       const dIni2=new Date(parseInt(mIniSolo[3],10),parseInt(mIniSolo[2],10)-1,parseInt(mIniSolo[1],10));
       const diasSolo=parseInt(mDiasSolo[1],10);
-      if(!isNaN(dIni2.getTime())&&diasSolo>0&&diasSolo<=150){
+      // El año también puede venir corrupto en la "Fecha Inicio" que usa
+      // este fallback (caso real: "19-07-2006" en vez de "19-07-2026",
+      // mismo tipo de error que ya vimos con meses/días) -- si el año ni
+      // siquiera está cerca del año auditado, mejor dejar la página en
+      // "sin fecha legible" que registrar un período con año inventado.
+      const anioPlausible=!va_periodoAnio||Math.abs(dIni2.getFullYear()-va_periodoAnio)<=1;
+      if(!isNaN(dIni2.getTime())&&diasSolo>0&&diasSolo<=150&&anioPlausible){
         fechaInicio=dIni2;
         dias=diasSolo;
       }
@@ -15183,7 +15196,11 @@ function va_renderLicencias(){
     d.paginasSinFecha.forEach(f=>{h+=`<tr><td style="text-align:center">${f.pagina}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td></tr>`;});
     h+='</tbody></table>';
   }
-  h+=va_renderIAAuditSection('Licencias Médicas');
+  // El detalle de lectura con IA página por página no se muestra en este
+  // panel (pedido explícito del usuario -- es información de diagnóstico
+  // interno, no algo que necesite ver quien audita Licencias). Los datos
+  // siguen en va_iaAuditLog igual que siempre (se puede seguir viendo en
+  // el Excel exportado si hace falta revisar el detalle).
   return h;
 }
 

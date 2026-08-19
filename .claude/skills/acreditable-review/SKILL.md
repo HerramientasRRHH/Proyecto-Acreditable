@@ -2058,3 +2058,50 @@ este sandbox (misma limitación de render/OCR ya documentada); validado
 por: sintaxis OK, regex probado contra texto OCR real capturado de la
 carpeta, y revisión de código para la Fase 3/progreso (lógica análoga a
 patrones ya probados en producción para Liquidaciones).
+
+## La corrida real confirmó el salto (44/49 ✅) pero destapó una regresión propia: año corrupto colando un total inflado
+
+El usuario corrió de nuevo con todos los fixes de la ronda anterior: pasó
+de ~37 a 44 de 49 trabajadores en ✅. Pero Pino Lagos pasó de "24/17" (antes,
+subcontando) a "24/**42**" (ahora, SOBRE-contando) -- la observación mostraba
+un período con año "19-07-**2006**" en vez de 2026. Causa: el reintento a
+escala alta (Fase 3, agregado en el commit anterior) leyó el año de
+"Fecha Inicio" con un dígito perdido/corrupto (2026→2006), pero como
+"Fecha término" sí leyó bien (2026), el rango `dFin-dIni` daba ~20 años =
+miles de días -- y ese rango gigante, aunque construido sobre una fecha de
+inicio falsa, igual "pasaba por" julio 2026 en algún punto del conteo día a
+día y colaba un número de días fantasma (25 en vez de los 7 reales de ese
+período). Antes del reintento a escala alta esta página simplemente no
+daba ningún match (quedaba en "sin fecha", visible) -- el reintento, al
+mejorar la lectura de UNA fecha pero no la otra, la empeoró silenciosamente
+en vez de dejarla afuera.
+
+**Fix**: tope de 200 días en el rango completo (Inicio↔término) antes de
+aceptarlo -- las licencias reales de este documento no superan ~84 días
+corridos, así que cualquier rango de miles de días es, por construcción,
+un año mal leído en alguna de las dos fechas, nunca un dato real. Se
+agregó el mismo resguardo (año dentro de `va_periodoAnio ± 1`) al fallback
+de "Inicio + N° Días" que ya existía, por el mismo tipo de corrupción
+posible ahí. Validado con el texto real corrupto (año 2006): antes de
+este fix habría colado un aporte de 0 días con una fecha de inicio
+inventada (2006) mostrada en la observación -- ahora correctamente da
+`null` (queda en "sin fecha legible" para revisión manual). Re-validado el
+caso ya confirmado de Santana Herrera (22 días) sin regresión.
+
+**Lección**: cuando se agrega un reintento con una fuente de lectura más
+generosa/agresiva (acá, escala 4.0) como red de seguridad para casos que
+ya fallaban, hay que sumarle SUS PROPIOS resguardos de sanidad -- no basta
+con que "ya había un check antes" (el `dFin>=dIni` existía, pero no
+alcanza para detectar un año mal leído que igual da un rango cronológicamente
+válido, solo absurdamente largo). Cada vez que se ensancha un rango de
+tolerancia (más caracteres de hueco, más escala de imagen, un fallback
+nuevo), conviene preguntarse explícitamente "¿qué pasa si UNA sola cifra
+sale mal en vez de todas?" antes de darlo por seguro.
+
+**También ajustado por pedido explícito del usuario**: se sacó la sección
+"🔍 Detalle de lectura con IA" del panel de Licencias (`va_renderLicencias`)
+-- la considera información de diagnóstico interno, no algo que el reporte
+final necesite mostrar. Las dos secciones de arriba ("días que no
+coinciden" y "páginas con fecha ilegible") se mantienen. El log
+(`va_iaAuditLog`) sigue completo internamente y en el Excel exportado, solo
+se dejó de renderizar en el panel de esta pestaña.
