@@ -2006,3 +2006,55 @@ forma de distinguir "no veo a Fulano porque está bien" de "no veo a Fulano
 porque se perdió". Siempre que la nómina base es chica/mediana (acá ~50),
 vale la pena mostrar el universo completo con estado por fila, no solo el
 subconjunto con problemas.
+
+## Reintento a escala alta para las páginas "fecha ilegible" + progreso real de la barra
+
+El usuario pidió confirmar entrando yo mismo al PDF si las 14 páginas
+marcadas "fecha ilegible" realmente no se podían leer mejor (con OCR "por
+rangos" o con IA), y por separado señaló que la barra de progreso de la
+validación no es "real" (1% a 100% proporcional al trabajo real).
+
+**Páginas ilegibles**: se renderizaron las 14 páginas reales a escala 4.0
+(el pipeline normal usa 2.5) y se OCR'earon con pytesseract. Resultado
+mixto real: algunas mejoran mucho (página 35 de Monroy Monroy pasa de
+irrecuperable a perfectamente legible), otras mejoran parcialmente (página
+60 de Santana Herrera: "Fecha Inicio" pasa a leerse bien pero "Fecha
+término" sigue con basura), y varias siguen sin dar ningún match de
+"Fecha Inicio/término" ni a escala alta (19, 24, 25, 47, 55, 62, 73 --
+probablemente otro layout o daño físico del escaneo, no resoluble con más
+escala). Se encontraron además 2 problemas de regex reales en el camino:
+el separador de fecha a veces es "." no "-" (ej. "25.07-2026", página 49
+de Pino Lagos), y cuando "Fecha término" queda irrecuperable pero "Fecha
+Inicio" + "N° Días" SÍ se leen limpios por separado (caso Santana), se
+puede calcular el término desde ahí en vez de descartar la página entera.
+
+**Fix implementado** (`va_extraerDatosLicencia`, ~línea 10897): separador
+`[-.\s]?` en vez de `[-\s]?`; nuevo fallback de último recurso
+Inicio+N°Días cuando el rango completo no matchea (acotado a 1-150 días
+para no confiar ciegamente en una casilla que ya sabíamos poco fiable).
+Y una **Fase 3 nueva** en `va_validarLicenciasMedicas`: después de la Fase
+2, para las páginas que quedaron en `va_licMedPaginasSinFecha` de ESE
+archivo, se re-renderiza SOLO esas páginas a escala 4.0 y se reintenta la
+extracción -- si esta vez sí da fecha válida, se registra el aporte de
+días y la página sale de la lista de "sin fecha". Acotado a un puñado de
+páginas (normalmente <15 de 75), así que el costo extra en tiempo es
+chico comparado con re-hacer TODO el archivo a escala alta. Validado con
+el texto OCR real de la página 60 (Santana Herrera) a escala 4.0: antes
+daba `null`, con los 2 fixes de regex juntos da exactamente los 22 días de
+julio esperados (coincide con el `.oxps`).
+
+**Progreso real de la barra**: se confirmó que `va_validarLiquidaciones` sí
+llama a `va_setProg` proporcional a páginas/archivos completados, pero
+`va_validarLicenciasMedicas` NUNCA llamaba a `va_setProg` -- la barra
+quedaba clavada en 42% (el checkpoint de "validando licencias médicas...")
+durante los varios minutos que tarda ese paso, y saltaba de golpe a 50% al
+terminar. Se agregó una llamada a `va_setProg` dentro del consumidor de la
+Fase 1 (paralelo), proporcional a páginas completadas del archivo,
+mapeada al rango 42-49% -- mismo patrón que ya usa Liquidaciones (rango
+6-34%).
+
+Ninguno de los cambios de esta ronda se pudo probar de punta a punta en
+este sandbox (misma limitación de render/OCR ya documentada); validado
+por: sintaxis OK, regex probado contra texto OCR real capturado de la
+carpeta, y revisión de código para la Fase 3/progreso (lógica análoga a
+patrones ya probados en producción para Liquidaciones).

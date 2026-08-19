@@ -10895,13 +10895,37 @@ function va_extraerDatosLicencia(txt){
   // mismo (el de "Fecha término" mide como mucho 13, pero se sube igual por
   // simetría/margen).
   if(!fechaInicio||!dias){
-    const mComp=txt.match(/Fecha\s+Inicio[\s\S]{0,40}?(\d{1,2})[-\s]?(\d{1,2})[-\s]?(\d{4})[\s\S]{0,200}?Fecha\s+t[eé]rmino[\s\S]{0,40}?(\d{1,2})[-\s]?(\d{1,2})[-\s]?(\d{4})/i);
+    // Separador flexible incluye "." además de "-"/espacio -- caso real:
+    // página 49 (Pino Lagos) lee "Fecha término * 25.07-2026" con punto en
+    // vez de guión entre día y mes.
+    const mComp=txt.match(/Fecha\s+Inicio[\s\S]{0,40}?(\d{1,2})[-.\s]?(\d{1,2})[-.\s]?(\d{4})[\s\S]{0,200}?Fecha\s+t[eé]rmino[\s\S]{0,40}?(\d{1,2})[-.\s]?(\d{1,2})[-.\s]?(\d{4})/i);
     if(mComp){
       const dIni=new Date(parseInt(mComp[3],10),parseInt(mComp[2],10)-1,parseInt(mComp[1],10));
       const dFin=new Date(parseInt(mComp[6],10),parseInt(mComp[5],10)-1,parseInt(mComp[4],10));
       if(!isNaN(dIni.getTime())&&!isNaN(dFin.getTime())&&dFin>=dIni){
         fechaInicio=dIni;
         dias=Math.round((dFin-dIni)/(1000*60*60*24))+1;
+      }
+    }
+  }
+  // Último recurso: si "Fecha término" salió con basura (dígito de más/
+  // inconsistente) pero "Fecha Inicio" Y la casilla "N° de Días" SÍ se
+  // leen limpias por separado, calculamos el término desde ahí. Caso real:
+  // Santana Herrera, página 60 -- "Fecha Inicio * 23-06-2026" y "N° Días
+  // = 30" salen limpios, pero "Fecha término" sale "229.07-2026"
+  // (irrecuperable); inicio+30-1 días da el 22-07-2026 correcto (coincide
+  // con el .oxps). Acotado a 1-150 días para no confiar en una lectura de
+  // esta casilla que venga evidentemente pegada con ruido de otra columna
+  // (ya sabemos que esta casilla en particular es la menos confiable).
+  if(!fechaInicio||!dias){
+    const mIniSolo=txt.match(/Fecha\s+Inicio[\s\S]{0,40}?(\d{1,2})[-.\s]?(\d{1,2})[-.\s]?(\d{4})/i);
+    const mDiasSolo=txt.match(/N[ºo°*]?\s*D.AS\D{0,10}?(\d{1,3})\b/i);
+    if(mIniSolo&&mDiasSolo){
+      const dIni2=new Date(parseInt(mIniSolo[3],10),parseInt(mIniSolo[2],10)-1,parseInt(mIniSolo[1],10));
+      const diasSolo=parseInt(mDiasSolo[1],10);
+      if(!isNaN(dIni2.getTime())&&diasSolo>0&&diasSolo<=150){
+        fechaInicio=dIni2;
+        dias=diasSolo;
       }
     }
   }
@@ -12562,6 +12586,7 @@ async function va_validarLicenciasMedicas(){
     }
     if(!ren_ocrWorker) await cargarOCR();
     const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
+    const idxSinFechaAntes=va_licMedPaginasSinFecha.length; // marca dónde empiezan las de ESTE archivo
     // Fase 1: extraer el texto de CADA página en paralelo (nativo, y OCR de
     // página completa con ambas rotaciones si hace falta) usando un pool de
     // workers -- esta es la parte cara (medido en un caso real: ~83s por
@@ -12573,6 +12598,14 @@ async function va_validarLicenciasMedicas(){
     const poolLic=await va_cargarOCRPool(poolSizeLic);
     const textosPorPagina=new Array(pdf.numPages+1);
     let sigPaginaLic=1;
+    // Progreso REAL por página (antes esta función nunca llamaba a
+    // va_setProg -- la barra quedaba congelada en el 42% de "Validando
+    // licencias médicas..." durante TODO el proceso, que en una corrida
+    // real con 75 páginas + IA puede tardar varios minutos, y saltaba de
+    // golpe al 50% recién al terminar. Mismo patrón que ya usa
+    // va_validarLiquidaciones (progreso proporcional a páginas/archivos
+    // completados).
+    let paginasLicCompletadas=0;
     // Fase 1 hace TODO el trabajo lento por página (OCR completo, el
     // recorte del RUN si hace falta, y ahora también la llamada a IA) --
     // ninguno de estos 3 pasos depende de páginas vecinas, así que los 3
@@ -12605,6 +12638,9 @@ async function va_validarLicenciasMedicas(){
           leidoIA=await va_iaLeerLicenciaMedica(page);
         }
         textosPorPagina[miP]={txt,txtLen,encontrados,rutMatchLH,rutRunCrop,leidoIA,intentoIA};
+        paginasLicCompletadas++;
+        va_setProg(Math.min(42+Math.round(paginasLicCompletadas/pdf.numPages*8),49),
+          `🏥 Licencias Médicas: página ${paginasLicCompletadas}/${pdf.numPages} leída${intentoIA?' (con IA)':''}`);
       }
     }
     await Promise.all(poolLic.slice(0,poolSizeLic).map(w=>va_consumidorTextoLicencia(w)));
@@ -12688,6 +12724,48 @@ async function va_validarLicenciasMedicas(){
           const w=va_lhFiltered.find(x=>x.rutNorm===rutFinal);
           va_licMedPaginasSinFecha.push({pagina:p,rut:w?w.rut:rutFinal,nombre:w?w.nombre:rutFinal});
         }
+      }
+    }
+    // Fase 3: reintento dirigido a escala más alta SOLO para las páginas
+    // que quedaron "sin fecha legible" en ESTE archivo (RUT/nombre ya
+    // atribuido, pero fechaInicio/dias no salieron a la escala normal de
+    // 2.5). Validado con un caso real (Santana Herrera, página 60): a
+    // escala 2.5 la etiqueta "Fecha término" sale tan corrupta que ni el
+    // regex la reconoce ("Fecha t�rm'no"), pero a escala 4.0 la imagen es
+    // lo bastante nítida para leerla bien y el fix da los días correctos.
+    // Acotado a un puñado de páginas (normalmente <15 de 75) -- el costo
+    // extra es chico comparado con re-hacer TODO el archivo a escala alta.
+    const paginasARever=va_licMedPaginasSinFecha.slice(idxSinFechaAntes);
+    if(paginasARever.length){
+      const rutPorPagina=new Map();
+      for(const pf of paginasARever){
+        const w=va_lhFiltered.find(x=>x.rut===pf.rut);
+        if(w)rutPorPagina.set(pf.pagina,w.rutNorm);
+      }
+      const recuperadas=[];
+      for(const pf of paginasARever){
+        const rutNorm=rutPorPagina.get(pf.pagina);
+        if(!rutNorm)continue;
+        try{
+          const page=await pdf.getPage(pf.pagina);
+          const vp=page.getViewport({scale:4.0});
+          const canvas=document.createElement('canvas');
+          canvas.width=vp.width;canvas.height=vp.height;
+          await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+          const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
+          const{data:{text}}=await ren_ocrWorker.recognize(blob);
+          const datos=va_extraerDatosLicencia(text||'');
+          if(datos.fechaInicio&&datos.dias&&va_periodoMes&&va_periodoAnio){
+            const dEnPeriodo=va_diasLicenciaEnPeriodo(datos.fechaInicio,datos.dias,va_periodoMes,va_periodoAnio);
+            if(dEnPeriodo!=null){
+              va_registrarDiasLicencia(rutNorm,datos.fechaInicio,datos.dias,dEnPeriodo);
+              recuperadas.push(pf.pagina);
+            }
+          }
+        }catch(e){console.warn('Reintento escala alta Licencias pág',pf.pagina,e);}
+      }
+      if(recuperadas.length){
+        va_licMedPaginasSinFecha=va_licMedPaginasSinFecha.filter(pf=>!recuperadas.includes(pf.pagina));
       }
     }
   }
