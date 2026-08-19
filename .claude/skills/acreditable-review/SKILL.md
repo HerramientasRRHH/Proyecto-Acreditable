@@ -1634,3 +1634,52 @@ casualidad, no alcanza con "el primero que pase" -- hay que preferir
 explícitamente el que además coincide con una fuente de verdad ya conocida
 (acá, la nómina). Mismo principio que `match_rut_cercano` en Liquidaciones,
 aplicado a un lugar donde antes no estaba.
+
+## Vitácora: Licencias Médicas lenta -- paralelización por página (implementada, velocidad no verificable en este sandbox)
+
+El usuario reportó que Licencias "se demora mucho" y preguntó si tenía
+sentido dado que ya integramos OCR+IA. Medición real (no adivinada): con el
+código de producción (`va_ocrPaginaMejorRotacion`, la función real que usa
+`va_validarLicenciasMedicas`) corriendo contra la página 5 real de
+`licencia medica.pdf` en el navegador (Tesseract.js), **una sola página con
+sus 2 rotaciones (0°/180°) tardó 82.7 segundos**. Causa raíz estructural
+(no es OCR duplicado -- ese patrón ya estaba bien evitado acá, `let txtLen`
+se reasigna tras el OCR): el archivo tiene 75 páginas, 100% escaneadas, y se
+procesan una por una, totalmente secuencial, cada una con 2 pasadas de OCR
+completo de página. Sin paralelismo esto escala linealmente con el número de
+páginas.
+
+**Fix implementado** (`va_validarLicenciasMedicas`, index.html ~línea
+12471+): se separó el trabajo en 2 fases. Fase 1 extrae el texto de CADA
+página (nativo, y OCR de página completa con ambas rotaciones si hace
+falta) EN PARALELO usando el mismo pool de workers ya construido para
+Liquidaciones (`va_cargarOCRPool`/`va_procesarArchivosEnParalelo`,
+`va_ocrPaginaMejorRotacion` ya aceptaba un `worker` opcional). Fase 2
+procesa cada página EN ORDEN, una a la vez, con la lógica ORIGINAL sin
+tocar (matching de RUT, tabla vs formulario individual, suma de días) --
+esto es deliberado: Licencias no tiene estado pegajoso entre páginas como
+Contratos, pero SÍ tiene un acumulador compartido
+(`va_licMedDiasPorRut`, un Map que SUMA días si la misma persona aparece en
+más de una página) que sería una condición de carrera real si se
+mutara desde workers concurrentes (dos páginas del mismo RUT resolviendo
+casi al mismo tiempo podrían pisarse la suma). Separar "leer" (paralelo) de
+"acumular" (secuencial, en orden) elimina el riesgo por diseño, sin
+necesitar ningún candado. Se agregó `va_liberarOCRPool()` al final de la
+función, mismo motivo que Liquidaciones (Licencias corre temprano en el
+pipeline, antes de Libro Remuneraciones/Asistencia/Contratos que dependen
+del worker único global).
+
+Validado: sintaxis OK (servido local, sin errores JS en consola). **No se
+pudo medir la mejora de velocidad real en este sandbox** -- un test con
+pool de 4 workers sobre solo 4 páginas reales corrió más de 9 minutos sin
+terminar (mismo límite ya documentado para el intento de paralelizar
+Liquidaciones: este navegador sandbox no tiene CPU real disponible para
+correr varios workers de Tesseract genuinamente en paralelo, así que
+"paralelo" acá compite por el mismo núcleo en vez de acelerar). Esto no
+invalida el fix -- la lógica es la misma que ya se usa y probó sirviendo
+para Liquidaciones en producción, y el diseño de 2 fases evita por
+construcción la única condición de carrera posible -- pero la velocidad
+real solo se puede confirmar en un navegador de verdad (Chrome de
+escritorio del usuario), que es justo el siguiente paso pendiente: el
+usuario dijo que lo iba a probar en la página real antes de aprobar el
+push a GitHub/Render.

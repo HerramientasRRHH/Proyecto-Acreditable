@@ -12482,19 +12482,40 @@ async function va_validarLicenciasMedicas(){
     }
     if(!ren_ocrWorker) await cargarOCR();
     const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
+    // Fase 1: extraer el texto de CADA página en paralelo (nativo, y OCR de
+    // página completa con ambas rotaciones si hace falta) usando un pool de
+    // workers -- esta es la parte cara (medido en un caso real: ~83s por
+    // página escaneada con las 2 rotaciones) y las páginas de Licencias no
+    // dependen unas de otras (a diferencia de Contratos, no hay estado
+    // "pegajoso" tipo tipoActual que arrastrar entre páginas), así que se
+    // pueden pedir todas a la vez sin cambiar ningún resultado.
+    const poolSizeLic=Math.min(4,pdf.numPages);
+    const poolLic=await va_cargarOCRPool(poolSizeLic);
+    const textosPorPagina=new Array(pdf.numPages+1);
+    let sigPaginaLic=1;
+    async function va_consumidorTextoLicencia(worker){
+      while(sigPaginaLic<=pdf.numPages){
+        const miP=sigPaginaLic++;
+        const page=await pdf.getPage(miP);
+        const tc=await page.getTextContent();
+        let txt=tc.items.map(x=>x.str).join(' ');
+        let txtLen=txt.replace(/\s/g,'').length;
+        if(txtLen<40){
+          const ocrTxt=await va_ocrPaginaMejorRotacion(page,2.5,[0,180],worker);
+          if(ocrTxt&&ocrTxt.replace(/\s/g,'').length>txtLen){txt=ocrTxt;txtLen=txt.replace(/\s/g,'').length;}
+        }
+        textosPorPagina[miP]={txt,txtLen};
+      }
+    }
+    await Promise.all(poolLic.slice(0,poolSizeLic).map(w=>va_consumidorTextoLicencia(w)));
+    // Fase 2: procesar cada página EN ORDEN, uno a la vez -- misma lógica de
+    // siempre, sin cambios. Todo lo que escribe en va_licMedRuts/
+    // va_licMedDiasPorRut queda secuencial a propósito (si dos páginas del
+    // mismo trabajador se sumaran en paralelo, un empate de tiempos podría
+    // perder una de las dos sumas de días).
     for(let p=1;p<=pdf.numPages;p++){
       const page=await pdf.getPage(p);
-      const tc=await page.getTextContent();
-      let txt=tc.items.map(x=>x.str).join(' ');
-      let txtLen=txt.replace(/\s/g,'').length;
-      // Página escaneada: OCR de página completa probando ambas rotaciones
-      // (ver va_ocrPaginaMejorRotacion) ANTES de intentar nada más — a
-      // diferencia del formulario Minsal individual, el listado tabular
-      // necesita el texto de la página entera, no solo un recorte del RUN.
-      if(txtLen<40){
-        const ocrTxt=await va_ocrPaginaMejorRotacion(page);
-        if(ocrTxt&&ocrTxt.replace(/\s/g,'').length>txtLen){txt=ocrTxt;txtLen=txt.replace(/\s/g,'').length;}
-      }
+      let{txt,txtLen}=textosPorPagina[p];
       // 1) ¿Es una página del listado tabular? (varias filas RUT+fechas+días)
       const filasTabla=va_procesarFilasLicenciaTabla(txt);
       if(filasTabla)continue; // ya se sacó todo lo útil de esta página
@@ -12522,6 +12543,12 @@ async function va_validarLicenciasMedicas(){
       }
     }
   }
+  // Licencias corre temprano en el pipeline (antes de Libro Remuneraciones/
+  // Asistencia/Contratos, que dependen del worker único global) -- si el
+  // pool queda vivo compite por CPU con esos pasos, el mismo bug que colgó
+  // corridas reales cuando se paralelizó Liquidaciones por primera vez (ver
+  // skill acreditable-review). Se libera apenas termina este paso.
+  await va_liberarOCRPool();
   // Trabajadores con días de licencia en LH que necesitan justificativo
   const conLicLH=va_lhFiltered.filter(x=>x.diasLic>0&&!x.termino);
   const cubiertos=conLicLH.filter(x=>va_licMedRuts.has(x.rutNorm));
