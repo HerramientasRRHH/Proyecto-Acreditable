@@ -12542,6 +12542,14 @@ async function va_validarLicenciasMedicas(){
     const poolLic=await va_cargarOCRPool(poolSizeLic);
     const textosPorPagina=new Array(pdf.numPages+1);
     let sigPaginaLic=1;
+    // Fase 1 hace TODO el trabajo lento por página (OCR completo, el
+    // recorte del RUN si hace falta, y ahora también la llamada a IA) --
+    // ninguno de estos 3 pasos depende de páginas vecinas, así que los 3
+    // pueden correr en paralelo igual que el OCR. Antes solo el OCR estaba
+    // acá y el RUN-crop + IA quedaban en la Fase 2 secuencial -- con 37
+    // páginas necesitando IA en una corrida real, eso las serializaba una
+    // por una (varios minutos solo en eso). Nada de esto escribe en
+    // va_licMedRuts/va_licMedDiasPorRut todavía -- solo junta datos.
     async function va_consumidorTextoLicencia(worker){
       while(sigPaginaLic<=pdf.numPages){
         const miP=sigPaginaLic++;
@@ -12553,42 +12561,43 @@ async function va_validarLicenciasMedicas(){
           const ocrTxt=await va_ocrPaginaMejorRotacion(page,2.5,[0,180],worker);
           if(ocrTxt&&ocrTxt.replace(/\s/g,'').length>txtLen){txt=ocrTxt;txtLen=txt.replace(/\s/g,'').length;}
         }
-        textosPorPagina[miP]={txt,txtLen};
+        const encontrados=va_findAllRuts(txt);
+        const rutMatchLH=[...encontrados].find(r=>lhRutSet.has(r));
+        let rutRunCrop=null;
+        if(txtLen<40&&!rutMatchLH){
+          const runTxt=await va_ocrRunLicenciaMedica(page,worker);
+          rutRunCrop=va_extraerRutConChecksum(runTxt,lhRutSet);
+        }
+        let leidoIA=null,intentoIA=false;
+        if(!rutMatchLH&&!rutRunCrop&&iaKeyOk){
+          intentoIA=true;
+          leidoIA=await va_iaLeerLicenciaMedica(page);
+        }
+        textosPorPagina[miP]={txt,txtLen,encontrados,rutMatchLH,rutRunCrop,leidoIA,intentoIA};
       }
     }
     await Promise.all(poolLic.slice(0,poolSizeLic).map(w=>va_consumidorTextoLicencia(w)));
-    // Fase 2: procesar cada página EN ORDEN, uno a la vez -- misma lógica de
-    // siempre, sin cambios. Todo lo que escribe en va_licMedRuts/
-    // va_licMedDiasPorRut queda secuencial a propósito (si dos páginas del
-    // mismo trabajador se sumaran en paralelo, un empate de tiempos podría
-    // perder una de las dos sumas de días).
+    // Fase 2: procesar cada página EN ORDEN, uno a la vez -- rápida y
+    // puramente secuencial a propósito (todo lo lento ya se resolvió en
+    // Fase 1). Todo lo que escribe en va_licMedRuts/va_licMedDiasPorRut
+    // queda acá (si dos páginas del mismo trabajador se sumaran en
+    // paralelo, un empate de tiempos podría perder una de las dos sumas).
     for(let p=1;p<=pdf.numPages;p++){
-      const page=await pdf.getPage(p);
-      let{txt,txtLen}=textosPorPagina[p];
+      const r=textosPorPagina[p];
       // 1) ¿Es una página del listado tabular? (varias filas RUT+fechas+días)
-      const filasTabla=va_procesarFilasLicenciaTabla(txt);
+      const filasTabla=va_procesarFilasLicenciaTabla(r.txt);
       if(filasTabla)continue; // ya se sacó todo lo útil de esta página
       // 2) Formulario individual (Minsal u otro) — comportamiento original
-      const encontrados=va_findAllRuts(txt);
-      encontrados.forEach(r=>va_licMedRuts.add(r));
-      const rutMatchLH=[...encontrados].find(r=>lhRutSet.has(r));
-      // Red de seguridad: si la página viene escaneada (poco texto embebido) y
-      // ninguno de los RUTs encontrados coincide con la nómina, intentamos leer
-      // el RUN recortado con checksum antes de dar la página por perdida.
-      let rutFinal=rutMatchLH;
-      if(txtLen<40&&!rutMatchLH){
-        const runTxt=await va_ocrRunLicenciaMedica(page);
-        const rutValidado=va_extraerRutConChecksum(runTxt,lhRutSet);
-        if(rutValidado){va_licMedRuts.add(rutValidado);rutFinal=rutValidado;}
-      }
+      r.encontrados.forEach(rut=>va_licMedRuts.add(rut));
+      let rutFinal=r.rutMatchLH;
+      if(r.rutRunCrop){va_licMedRuts.add(r.rutRunCrop);rutFinal=r.rutRunCrop;}
       // Nivel 2: IA visual -- solo si sigue sin rutFinal y hay key configurada.
       // El nombre que devuelve la IA es más confiable que el RUT en formularios
       // manuscritos/escaneados de mala calidad, mismo principio que Exenciones.
       let datosIA=null;
-      if(!rutFinal&&iaKeyOk){
+      if(r.intentoIA){
         paginasIALic++;
-        const leidoIA=await va_iaLeerLicenciaMedica(page);
-        if(leidoIA&&leidoIA.nombre){
+        if(r.leidoIA&&r.leidoIA.nombre){
           // va_matchNombreConRecorte (no va_matchNombreNomina directo): la IA
           // suele leer el nombre legal completo ("Apellidos, Nombre Segundo-
           // Nombre") mientras el LH a veces solo trae el primer nombre --
@@ -12597,22 +12606,23 @@ async function va_validarLicenciasMedicas(){
           // siempre cae al final (los nombres van después de los apellidos),
           // así que recortar desde el final resuelve esto igual que ya
           // resuelve el ruido de OCR del Libro de Asistencia.
-          const matchIA=va_matchNombreConRecorte(leidoIA.nombre,va_lhFiltered);
+          const matchIA=va_matchNombreConRecorte(r.leidoIA.nombre,va_lhFiltered);
           va_iaAuditLog.push({modulo:'Licencias Médicas',pagina:p,tipo:'LICENCIA_MEDICA',
-            nombreLeido:leidoIA.nombre,resultado:matchIA?'match':'sin_match',
+            nombreLeido:r.leidoIA.nombre,resultado:matchIA?'match':'sin_match',
             atribuidoA:matchIA?matchIA.nombre:null,
             motivo:matchIA?null:'nombre leído por IA no coincide con ningún trabajador de la nómina'});
           if(matchIA){
             rutFinal=matchIA.rutNorm;
             va_licMedRuts.add(rutFinal);
-            datosIA={fechaInicio:va_parseFechaDDMMYYYY(leidoIA.fechaInicio||''),dias:leidoIA.numeroDias};
+            datosIA={fechaInicio:va_parseFechaDDMMYYYY(r.leidoIA.fechaInicio||''),dias:r.leidoIA.numeroDias};
           }
-        }else if(leidoIA){
+        }else if(r.leidoIA){
           va_iaAuditLog.push({modulo:'Licencias Médicas',pagina:p,tipo:'LICENCIA_MEDICA',
             nombreLeido:null,resultado:'sin_lectura',atribuidoA:null,
             motivo:'la IA no identificó ningún trabajador en la página'});
         }
       }
+      const txt=r.txt;
       // Días que la licencia de ESTA página aportan al mes auditado -- si la
       // IA fue quien resolvió esta página, usamos sus propias fechas/días en
       // vez de re-extraerlos del texto OCR (que en ese caso ya sabemos que
@@ -15538,11 +15548,29 @@ function va_exportExcel(){
     (df.faltantes||[]).forEach(f=>{h3.push([f.rut,f.nombre]);});
     XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(h3),'Finiquitos');
   }
-  // Hoja 4b: Licencias Médicas
+  // Hoja 4b: Licencias Médicas -- antes solo traía el resumen y los
+  // faltantes; el usuario pidió que el Excel traiga el MISMO detalle que se
+  // ve en los paneles de la app (días que no coinciden + detalle de lectura
+  // con IA), porque ese detalle es justo lo que permite auditar sin tener
+  // que volver a abrir el navegador.
   const dLic=va_docResults['licencias'];
   if(dLic&&dLic.cargado){
-    const h4b=[['Licencias Médicas — Resultado'],['Con lic. en LH',dLic.totalLH],['Con doc adjunto',dLic.cubiertos],[],['FALTANTES','','']];
+    const h4b=[['Licencias Médicas — Resultado'],['Con lic. en LH',dLic.totalLH],['Con doc adjunto',dLic.cubiertos],
+      ['Listado .oxps adjunto',dLic.oxpsIncluido?'Sí':'No -- los días de personas con varios períodos en el mes pueden salir incompletos'],
+      ['Páginas verificadas con IA',dLic.paginasIA||0],[],
+      ['SIN DOCUMENTO ADJUNTO','','']];
     (dLic.faltantes||[]).forEach(f=>{h4b.push([f.rut,f.nombre,`${f.diasLic||0} días`]);});
+    if((dLic.diasNoCoinciden||[]).length){
+      h4b.push([],['DÍAS QUE NO COINCIDEN CON EL LH','RUT','Nombre','Días LH','Días doc']);
+      dLic.diasNoCoinciden.forEach(f=>{h4b.push(['',f.rut,f.nombre,f.diasLH,f.diasDoc]);});
+    }
+    const auditLic=(va_iaAuditLog||[]).filter(a=>a.modulo==='Licencias Médicas');
+    if(auditLic.length){
+      h4b.push([],['DETALLE DE LECTURA CON IA','Pág.','Nombre leído por la IA','Resultado','Motivo / atribuido a']);
+      auditLic.forEach(a=>{
+        h4b.push(['',a.pagina,a.nombreLeido||'—',a.resultado,a.atribuidoA?('→ '+a.atribuidoA):(a.motivo||'')]);
+      });
+    }
     XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(h4b),'Licencias');
   }
   // Hoja 4: Exenciones

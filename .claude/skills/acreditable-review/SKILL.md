@@ -1777,3 +1777,38 @@ de "🔍 Detalle de lectura con IA" que ya se agregó es una fuente de
 diagnóstico muy rica por sí sola (qué leyó, en qué página, si matcheó) --
 pedirle al usuario que lo pegue en el chat suele alcanzar para diagnosticar
 sin gastar tiempo en el navegador o en releer PDFs reales.
+
+## Dos mejoras más pedidas tras la corrida real de 11 minutos: mover la IA a la fase paralela + Excel con el mismo detalle de los paneles
+
+Con la corrida real (75 páginas, 37 necesitando IA) tardando 11 minutos, el
+usuario pidió acelerar más y que el Excel exportado traiga el mismo detalle
+que se ve en los paneles de la app (no solo el resumen).
+
+**Rendimiento**: el RUN-crop-OCR de respaldo y la llamada a IA vivían en la
+Fase 2 (secuencial a propósito, para proteger la suma de días). Pero
+ninguno de los dos depende de otras páginas -- solo necesitan la página y un
+worker, igual que el OCR de página completa. Se movieron los 3 (OCR
+completo, RUN-crop, IA) a la Fase 1 paralela; la Fase 2 quedó como una
+reducción puramente secuencial y rápida (sin ningún `await` de I/O) que solo
+decide qué hacer con los resultados ya calculados. Esto no cambia NINGUNA
+regla de negocio, solo dónde ocurre la espera -- con 37 páginas necesitando
+IA y un pool de 4, en teoría deberían pasar de -3min serializadas a
+-1min en paralelo. Mismo cuidado de siempre: la escritura a
+`va_licMedRuts`/`va_licMedDiasPorRut` sigue 100% en Fase 2, así que la
+condición de carrera del día-sumado sigue evitada por diseño.
+
+**Excel con detalle completo**: la hoja "Licencias" del export
+(`va_exportExcel`, ~línea 15541) solo traía el resumen + faltantes. Ahora
+también incluye la sección "Listado .oxps adjunto" (Sí/No, con la
+advertencia si falta), "Días que no coinciden con el LH", y el detalle
+completo de lectura con IA (`va_iaAuditLog` filtrado por
+`modulo==='Licencias Médicas'`) -- exactamente las mismas 3 tablas que ya
+se veían en `va_renderLicencias()`. Validado armando la hoja con datos
+simulados (mock de `va_docResults['licencias']` + `va_iaAuditLog`) y
+confirmando que el array de filas queda idéntico en estructura al panel.
+
+Ninguno de los dos cambios se pudo medir/probar de punta a punta en este
+sandbox (mismas limitaciones de render/OCR ya documentadas arriba) --
+sintaxis verificada, lógica verificada por revisión de código + prueba con
+datos simulados. Pendiente que el usuario confirme tiempo real y que el
+Excel se vea bien en su máquina.
