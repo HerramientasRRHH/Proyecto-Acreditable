@@ -1927,3 +1927,49 @@ replicarlo en la otra explícitamente -- no basta con arreglar el síntoma
 más visible. La pista de que faltaba la segunda mitad del fix fue mirar
 CUÁL caso se arregló solo (Yañez, vía OCR) contra cuáles no (el resto, vía
 IA) y preguntarse por qué la misma clase de fix no aplicaba a ambos.
+
+## Con la columna de observación ya se ve el patrón real: no son bugs de código, es calidad de escaneo -- y eso también hay que hacerlo visible
+
+Con la observación de fechas ya en pantalla, el usuario preguntó por qué
+"seguía saltándose" tantas hojas y pidió que el motor "por capas" encuentre
+TODAS las posibilidades sin retroceder. Se investigó cada caso real
+(Vilca Taipe, Pino Lagos, Santana Herrera, Perez Vargas, Monroy Monroy)
+buscando su RUT en el texto OCR completo de las 75 páginas reales:
+
+- **Vilca Taipe, Perez Vargas**: su RUT aparece 0-1 veces en TODO el PDF
+  escaneado -- solo uno de sus 2 períodos tiene una página física en este
+  archivo. El otro período genuinamente NO ESTÁ en el PDF (solo en el
+  `.oxps`). No hay nada que leer ahí -- no es un bug, es una fuente que
+  falta.
+- **Santana Herrera, Monroy Monroy**: acá SÍ hay una página por cada
+  período (2 y 2 apariciones de RUT respectivamente), pero mirando el texto
+  OCR real de esas páginas se encontraron dígitos de fecha corruptos:
+  Santana tiene `Fecha Inicio * 23-08-2026` cuando el real es `23-06-2026`
+  (mes "06" leído "08" -- la fecha queda inconsistente, término antes que
+  inicio, y el código la rechaza correctamente); Monroy tiene
+  `Fecha Inicio * 26-06-2025` cuando el año real es 2026. Son errores de
+  OCR sobre una foto de mala calidad, no algo recuperable con un regex más
+  permisivo sin arriesgarse a inventar fechas.
+
+**Lo que SÍ se hizo** (aditivo, sin tocar nada que ya funcionaba -- pedido
+explícito "sin retroceder"): antes, cuando el RUT/nombre se atribuía bien
+pero la fecha no se podía leer, esa página contribuía 0 días EN SILENCIO,
+sin ningún rastro -- indistinguible de "esta persona no tiene licencia esos
+días". Se agregó `va_licMedPaginasSinFecha` (lista de
+`{pagina,rut,nombre}`, poblada en el único punto donde ya se decide
+`rutFinal` y se intenta leer la fecha) y una sección nueva en el panel +
+Excel: "⚠ Páginas con trabajador identificado pero fecha ilegible (revisar
+a mano)". Esto no arregla el dato faltante (no se puede, físicamente no es
+legible) pero lo saca de la invisibilidad -- ahora se sabe EXACTAMENTE qué
+páginas necesitan revisión humana en vez de asumir en silencio que el
+período no existe.
+
+**Conclusión para el usuario, importante repetir cada vez que se vuelva a
+preguntar por esto**: el techo de cobertura de SOLO el PDF escaneado está
+limitado por (a) qué períodos tienen página física en el archivo (algunos
+genuinamente no la tienen) y (b) la calidad de la foto/escaneo de cada una.
+Ninguno de los dos se arregla con más regex. El `.oxps` es la única fuente
+sin ninguno de estos dos problemas (texto nativo, no escaneado, 68/68
+filas ya confirmadas 100% correctas) -- es la vía de máxima cobertura real,
+no una opción secundaria. El banner de "no se detectó el .oxps" debe
+tomarse como el bloqueador #1, no como una advertencia opcional.

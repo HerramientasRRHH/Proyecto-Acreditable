@@ -10656,6 +10656,13 @@ const VA_BASES={
 let va_lhAll=[],va_lhFiltered=[],va_baseKey=null,va_sectorKey=null,va_subarea=null,va_licMedRuts=new Set();
 let va_licMedDiasPorRut=new Map(); // rutNorm -> días de licencia que caen en el mes auditado, según el documento
 let va_licMedFechasPorRut=new Map(); // rutNorm -> [{inicio,termino,diasEnPeriodo}, ...] -- un registro por cada período/licencia encontrada, para mostrar como observación auditable (pedido explícito: "al lado tendríamos las fechas en las observaciones")
+// Páginas donde SÍ se atribuyó el RUT/nombre correcto pero no se pudo leer
+// una fecha válida -- normalmente porque el OCR corrompió un dígito de la
+// fecha (mes/año/día mal leído) y la fecha resultante queda inconsistente
+// (término antes que inicio). Antes esto fallaba en silencio (0 días, sin
+// rastro); ahora queda visible para revisión manual -- pedido explícito del
+// usuario: "no se las saltes... que se note, sin retroceder".
+let va_licMedPaginasSinFecha=[];
 function va_registrarDiasLicencia(rutFila,fechaInicio,dias,dEnPeriodo){
   va_licMedDiasPorRut.set(rutFila,(va_licMedDiasPorRut.get(rutFila)||0)+dEnPeriodo);
   const fTermino=fechaInicio&&dias?new Date(fechaInicio.getTime()+(dias-1)*86400000):null;
@@ -12455,6 +12462,7 @@ async function va_validarLicenciasMedicas(){
   va_licMedRuts=new Set();
   va_licMedDiasPorRut=new Map();
   va_licMedFechasPorRut=new Map();
+  va_licMedPaginasSinFecha=[];
   const dd=va_docsData['licencias'];
   if(!dd||!dd.buffers||!dd.buffers.length){
     va_docResults['licencias']={nombre:'Licencias Médicas',cargado:false,estado:'—'};return;
@@ -12669,6 +12677,16 @@ async function va_validarLicenciasMedicas(){
         if(dEnPeriodo!=null){
           // Si el trabajador tiene varias licencias en el mismo mes, se suman
           va_registrarDiasLicencia(rutFinal,datos.fechaInicio,datos.dias,dEnPeriodo);
+        }else{
+          // El RUT/nombre SÍ se atribuyó bien en esta página, pero no se pudo
+          // sacar una fecha válida (típico: un dígito de la fecha salió mal
+          // leído -- ej. mes "06"→"08" o año "2026"→"2025" -- y la fecha
+          // queda inconsistente, o la casilla vino demasiado borrosa). Antes
+          // esto contribuía 0 días en silencio, sin ningún rastro; ahora
+          // queda visible para que alguien la revise a mano en vez de
+          // asumir que "no hay licencia esos días".
+          const w=va_lhFiltered.find(x=>x.rutNorm===rutFinal);
+          va_licMedPaginasSinFecha.push({pagina:p,rut:w?w.rut:rutFinal,nombre:w?w.nombre:rutFinal});
         }
       }
     }
@@ -12697,6 +12715,7 @@ async function va_validarLicenciasMedicas(){
     diasNoCoinciden:diasNoCoinciden.map(x=>({rut:x.rut,nombre:x.nombre,diasLH:x.diasLic,diasDoc:va_licMedDiasPorRut.get(x.rutNorm),
       periodos:(va_licMedFechasPorRut.get(x.rutNorm)||[]).map(p=>`${p.inicio} a ${p.termino} (${p.diasEnPeriodo}d)`).join('; ')})),
     paginasIA:paginasIALic,oxpsIncluido,
+    paginasSinFecha:va_licMedPaginasSinFecha.slice(),
     estado:(faltantes.length===0&&diasNoCoinciden.length===0)?'✅':((faltantes.length+diasNoCoinciden.length)<=2?'⚠':'❌')
   };
 }
@@ -15056,6 +15075,13 @@ function va_renderLicencias(){
     d.diasNoCoinciden.forEach(f=>{h+=`<tr><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLH}</td><td style="text-align:center">${f.diasDoc}</td><td style="font-size:.68rem">${f.periodos||'—'}</td></tr>`;});
     h+='</tbody></table>';
   }
+  if((d.paginasSinFecha||[]).length>0){
+    h+='<div class="ch-section-title" style="color:#a07900">⚠ Páginas con trabajador identificado pero fecha ilegible (revisar a mano)</div>';
+    h+='<div style="font-size:.72rem;color:#666;margin-bottom:6px">El RUT/nombre se leyó bien, pero un dígito de la fecha salió corrupto (mes/año/día mal leído por el OCR) y la fecha resultante no es válida -- esa página no aportó días, a diferencia de antes que fallaba sin dejar rastro.</div>';
+    h+='<table class="ch-tbl"><thead><tr><th>Pág.</th><th>RUT</th><th>Nombre</th></tr></thead><tbody>';
+    d.paginasSinFecha.forEach(f=>{h+=`<tr><td style="text-align:center">${f.pagina}</td><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td></tr>`;});
+    h+='</tbody></table>';
+  }
   h+=va_renderIAAuditSection('Licencias Médicas');
   return h;
 }
@@ -15600,6 +15626,10 @@ function va_exportExcel(){
     if((dLic.diasNoCoinciden||[]).length){
       h4b.push([],['DÍAS QUE NO COINCIDEN CON EL LH','RUT','Nombre','Días LH','Días doc','Observación (períodos encontrados)']);
       dLic.diasNoCoinciden.forEach(f=>{h4b.push(['',f.rut,f.nombre,f.diasLH,f.diasDoc,f.periodos||'']);});
+    }
+    if((dLic.paginasSinFecha||[]).length){
+      h4b.push([],['PÁGINAS CON TRABAJADOR IDENTIFICADO PERO FECHA ILEGIBLE (revisar a mano)','Pág.','RUT','Nombre']);
+      dLic.paginasSinFecha.forEach(f=>{h4b.push(['',f.pagina,f.rut,f.nombre]);});
     }
     const auditLic=(va_iaAuditLog||[]).filter(a=>a.modulo==='Licencias Médicas');
     if(auditLic.length){
