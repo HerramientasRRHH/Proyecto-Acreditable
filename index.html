@@ -12509,6 +12509,13 @@ async function va_validarLicenciasMedicas(){
     }
     return n;
   }
+  // Detectar si el listado tabular (.oxps) viene adjunto -- confirmado 3
+  // veces con datos reales que su ausencia es la causa #1 de "sin
+  // documento"/"días no coinciden": sin él, la única fuente son páginas
+  // sueltas del PDF escaneado, que a veces solo cubren UNO de varios
+  // períodos de una misma persona en el mes, subcontando los días aunque el
+  // resto de la lógica (matching, va_diasLicenciaEnPeriodo) esté perfecta.
+  let oxpsIncluido=false;
   for(let bi=0;bi<dd.buffers.length;bi++){
     const buf=dd.buffers[bi];
     const nombreArchivo=(dd.files&&dd.files[bi]&&dd.files[bi].name)||'';
@@ -12517,6 +12524,7 @@ async function va_validarLicenciasMedicas(){
     // vez de PDF, y antes era invisible para el validador (input solo
     // aceptaba .pdf). Es texto limpio, sin páginas de OCR que procesar.
     if(/\.oxps$/i.test(nombreArchivo)||/\.xps$/i.test(nombreArchivo)){
+      oxpsIncluido=true;
       const txtOxps=await va_readOxpsText(buf);
       va_procesarFilasOxpsLicencia(txtOxps);
       continue;
@@ -12581,7 +12589,15 @@ async function va_validarLicenciasMedicas(){
         paginasIALic++;
         const leidoIA=await va_iaLeerLicenciaMedica(page);
         if(leidoIA&&leidoIA.nombre){
-          const matchIA=va_matchNombreNomina(leidoIA.nombre,va_lhFiltered);
+          // va_matchNombreConRecorte (no va_matchNombreNomina directo): la IA
+          // suele leer el nombre legal completo ("Apellidos, Nombre Segundo-
+          // Nombre") mientras el LH a veces solo trae el primer nombre --
+          // caso real: IA lee "ALBALLAY VILLAGRÁN, PEDRO JULIO" pero el LH
+          // dice "Alballay Villagran Pedro" (sin "Julio"). El token de más
+          // siempre cae al final (los nombres van después de los apellidos),
+          // así que recortar desde el final resuelve esto igual que ya
+          // resuelve el ruido de OCR del Libro de Asistencia.
+          const matchIA=va_matchNombreConRecorte(leidoIA.nombre,va_lhFiltered);
           va_iaAuditLog.push({modulo:'Licencias Médicas',pagina:p,tipo:'LICENCIA_MEDICA',
             nombreLeido:leidoIA.nombre,resultado:matchIA?'match':'sin_match',
             atribuidoA:matchIA?matchIA.nombre:null,
@@ -12633,7 +12649,7 @@ async function va_validarLicenciasMedicas(){
     totalLH:conLicLH.length,cubiertos:cubiertos.length,
     faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre,diasLic:x.diasLic})),
     diasNoCoinciden:diasNoCoinciden.map(x=>({rut:x.rut,nombre:x.nombre,diasLH:x.diasLic,diasDoc:va_licMedDiasPorRut.get(x.rutNorm)})),
-    paginasIA:paginasIALic,
+    paginasIA:paginasIALic,oxpsIncluido,
     estado:(faltantes.length===0&&diasNoCoinciden.length===0)?'✅':((faltantes.length+diasNoCoinciden.length)<=2?'⚠':'❌')
   };
 }
@@ -14971,6 +14987,13 @@ function va_renderLicencias(){
     <div class="ch-kpi ok"><div class="v">${d.cubiertos||0}</div><div class="l">Con doc adjunto</div></div>
     <div class="ch-kpi${(d.faltantes||[]).length>0?' err':''}"><div class="v">${(d.faltantes||[]).length}</div><div class="l">Sin doc</div></div>
   </div>`;
+  if(!d.oxpsIncluido){
+    h+='<div style="background:#fff3cd;border:1px solid #f0d998;border-radius:7px;padding:10px 14px;margin-bottom:10px;font-size:.78rem;color:#7a5c00">'+
+      '⚠ No se detectó el archivo <b>"Listado de licencia medica.oxps"</b> entre los documentos subidos. '+
+      'Sin él, los trabajadores con VARIOS períodos de licencia en el mes (renovaciones) pueden salir con menos '+
+      'días de los reales, porque la única fuente queda en páginas sueltas del PDF escaneado y no siempre están '+
+      'todas. Si tienes ese archivo, adjúntalo junto al PDF para un conteo completo.</div>';
+  }
   if(d.paginasIA){
     h+=`<div style="background:#f2f7ff;border:1px solid #cfe0f5;border-radius:7px;padding:6px 12px;margin-bottom:10px;font-size:.72rem;color:#375;display:inline-block">🔧 ${d.paginasIA} página(s) sin RUT reconocible se verificaron con IA visual (ver detalle abajo)</div><br>`;
   }

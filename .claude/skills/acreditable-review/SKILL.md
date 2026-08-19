@@ -1723,3 +1723,57 @@ completar -- limitación de renderizado de PDF ya documentada para este
 entorno específico, independiente de si hay OCR o IA de por medio. Pendiente
 que el usuario confirme en su navegador real que la IA efectivamente
 resuelve el caso de Pelaez cuando el `.oxps` no está adjunto.
+
+## Confirmado con una corrida real completa: la ausencia del .oxps es la causa raíz de TODO lo que parecía "falla de días" -- y van 3 veces
+
+El usuario corrió la validación real (con el respaldo de IA ya activo,
+`Validacion_Acreditable_Antofagasta_Base única_2026-08-19.xlsx` + el panel
+completo pegado en el chat) y pidió auditar por qué "la lógica de días"
+seguía fallando -- 9 personas con "días no coinciden" y 2 sin documento.
+
+**El panel de auditoría de IA que el usuario pegó fue suficiente para
+diagnosticar TODO sin tocar el navegador ni la carpeta de documentos**:
+
+1. **Bug real #1 -- nombre leído por IA con un token de más rompe el match.**
+   El log mostraba "ALBALLAY VILLAGRÁN, PEDRO JULIO" y "VERGARA ROJAS, ROSA
+   BERTINA" como "sin match", pero el LH tiene "Alballay Villagran Pedro" y
+   "Vergara Rojas Rosa" -- la IA lee el nombre legal completo (con segundo
+   nombre) y el LH no lo tiene. `va_matchNombreNomina` exige cobertura 1.0
+   de TODOS los tokens leídos, así que un token de más (que siempre cae al
+   final, porque el formato es "Apellidos, Nombres") tira el match. Fix:
+   usar `va_matchNombreConRecorte` (ya existía, se usa en Libro de
+   Asistencia) en vez de `va_matchNombreNomina` directo para el match de IA
+   en Licencias -- recorta desde el final hasta encontrar match. Validado
+   con los 2 casos reales + un candidato trampa que comparte tokens con
+   ambos (para confirmar que no generaba una atribución cruzada falsa).
+
+2. **NO había bug de días -- era el .oxps ausente, otra vez.** Calculado a
+   mano desde el `.oxps` real (sumando TODOS los períodos de cada persona
+   con la misma fórmula que `va_diasLicenciaEnPeriodo`), las 9 personas con
+   "días no coinciden" dieron un match EXACTO 9/9 contra el "Días LH" del
+   Libro de Haberes (ej. Yañez Iriarte: 6+25=31, calza con LH=31; Monroy
+   Monroy: 2+14+14=30, calza con LH=30). Esto prueba que la fórmula de días
+   está perfecta y que el LH fue armado con exactamente esa misma lógica de
+   sumar períodos -- lo que falla es que la app, esa corrida, no estaba
+   usando el `.oxps` como fuente (los valores que mostró son siempre MÁS
+   BAJOS, consistentes con juntar solo fragmentos sueltos de páginas
+   individuales del PDF escaneado, que no siempre cubren todos los períodos
+   de una persona con licencias repetidas/renovadas en el mes).
+
+   Es la TERCERA vez en esta misma sesión que el síntoma "no se lee bien"
+   resulta ser el `.oxps` no adjuntado (antes: 18/19 faltantes de un
+   corrida, y el caso de Pelaez). Como patrón ya es demasiado recurrente
+   para seguir re-diagnosticándolo cada vez -- se agregó una alerta directa
+   en la UI (`va_renderLicencias`, banner amarillo) que avisa apenas no
+   detecta un archivo `.oxps`/`.xps` entre los documentos subidos a
+   Licencias, explicando el riesgo concreto (períodos múltiples subcontados)
+   en vez de dejar que el usuario tenga que adivinarlo por los resultados.
+
+**Lección para este módulo en particular**: antes de investigar cualquier
+reporte de "Licencias lee mal", lo primero es preguntar/verificar si el
+`.oxps` fue adjuntado esta vez -- es, con mucha diferencia, la causa más
+probable de cualquier síntoma de cobertura o días incompletos acá. El panel
+de "🔍 Detalle de lectura con IA" que ya se agregó es una fuente de
+diagnóstico muy rica por sí sola (qué leyó, en qué página, si matcheó) --
+pedirle al usuario que lo pegue en el chat suele alcanzar para diagnosticar
+sin gastar tiempo en el navegador o en releer PDFs reales.
