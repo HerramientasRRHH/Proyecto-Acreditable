@@ -12781,7 +12781,28 @@ async function va_validarLicenciasMedicas(){
           await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
           const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
           const{data:{text}}=await ren_ocrWorker.recognize(blob);
-          const datos=va_extraerDatosLicencia(text||'');
+          let datos=va_extraerDatosLicencia(text||'');
+          // Si ni el OCR a escala alta da fecha válida, probar con IA
+          // visual como último recurso -- confirmado con casos reales que
+          // Tesseract.js (el motor del navegador real) a veces lee peor
+          // que el motor usado para calibrar estos regex en páginas que a
+          // simple vista son perfectamente legibles (Araya Araya, Ferrada
+          // Muñoz, González González, Mizunuma Pool). La IA lee la imagen
+          // completa en vez de depender de que el OCR carácter-por-
+          // carácter salga limpio.
+          if((!datos.fechaInicio||!datos.dias)&&iaKeyOk){
+            const leidoIA=await va_iaLeerLicenciaMedica(page);
+            if(leidoIA){
+              const fiIA=va_parseFechaDDMMYYYY(leidoIA.fechaInicio||'');
+              const ffIA=va_parseFechaDDMMYYYY(leidoIA.fechaTermino||'');
+              let diasIA=leidoIA.numeroDias;
+              if(fiIA&&ffIA&&ffIA>=fiIA)diasIA=Math.round((ffIA-fiIA)/(1000*60*60*24))+1;
+              if(fiIA&&diasIA)datos={fechaInicio:fiIA,dias:diasIA};
+              va_iaAuditLog.push({modulo:'Licencias Médicas',pagina:pf.pagina,tipo:'LICENCIA_MEDICA_REINTENTO',
+                nombreLeido:leidoIA.nombre||null,resultado:(fiIA&&diasIA)?'match':'sin_lectura',atribuidoA:pf.nombre,
+                motivo:'reintento con IA tras fallar OCR a escala alta (fase 3)'});
+            }
+          }
           if(datos.fechaInicio&&datos.dias&&va_periodoMes&&va_periodoAnio){
             const dEnPeriodo=va_diasLicenciaEnPeriodo(datos.fechaInicio,datos.dias,va_periodoMes,va_periodoAnio);
             if(dEnPeriodo!=null){
@@ -12809,9 +12830,16 @@ async function va_validarLicenciasMedicas(){
   // Presente pero los días del documento no calzan con los que informa el LH
   // para el mes auditado (si no pudimos leer los días del documento, no se
   // marca como discrepancia — solo avisa cuando SÍ los leyó y no coinciden)
+  // Incluye TANTO "leyó días pero no coinciden" COMO "está cubierto (nombre/
+  // RUT atribuido) pero no se pudo leer ningún día" -- antes solo entraban
+  // los primeros, y el segundo grupo (páginas con fecha ilegible) quedaba
+  // SOLO en su propia tabla más abajo, dando la impresión de que "días que
+  // no coinciden" no traía todas las diferencias reales. Ambos son, para
+  // quien audita, el mismo tipo de alerta: "el LH dice que tiene días, el
+  // documento no lo confirma".
   const diasNoCoinciden=cubiertos.filter(x=>{
     const d=va_licMedDiasPorRut.get(x.rutNorm);
-    return d!=null&&d!==x.diasLic;
+    return d==null||d!==x.diasLic;
   });
   // Detalle COMPLETO: los ~50 trabajadores con licencia en el LH, uno por
   // fila, no solo los que tienen algún problema. Pedido explícito del
@@ -12833,8 +12861,9 @@ async function va_validarLicenciasMedicas(){
     nombre:'Licencias Médicas',cargado:true,
     totalLH:conLicLH.length,cubiertos:cubiertos.length,
     faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre,diasLic:x.diasLic})),
-    diasNoCoinciden:diasNoCoinciden.map(x=>({rut:x.rut,nombre:x.nombre,diasLH:x.diasLic,diasDoc:va_licMedDiasPorRut.get(x.rutNorm),
-      periodos:(va_licMedFechasPorRut.get(x.rutNorm)||[]).map(p=>`${p.inicio} a ${p.termino} (${p.diasEnPeriodo}d)`).join('; ')})),
+    diasNoCoinciden:diasNoCoinciden.map(x=>({rut:x.rut,nombre:x.nombre,diasLH:x.diasLic,
+      diasDoc:va_licMedDiasPorRut.has(x.rutNorm)?va_licMedDiasPorRut.get(x.rutNorm):'—',
+      periodos:(va_licMedFechasPorRut.get(x.rutNorm)||[]).map(p=>`${p.inicio} a ${p.termino} (${p.diasEnPeriodo}d)`).join('; ')||'—'})),
     detalleCompleto,
     paginasIA:paginasIALic,oxpsIncluido,
     paginasSinFecha:va_licMedPaginasSinFecha.slice(),

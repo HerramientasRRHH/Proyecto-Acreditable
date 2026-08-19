@@ -2178,3 +2178,47 @@ seguía corriendo la versión anterior).
   apariciones de su RUT en las 75 páginas del PDF escaneado -- ese dato
   físicamente no está ahí. Solo el `.oxps` lo tiene. Sin ese archivo
   adjunto, 49/49 no es alcanzable para ella pase lo que pase con el código.
+
+## El "49/49" resultó falso: pytesseract (mi entorno de prueba) y Tesseract.js (el navegador real) NO leen igual la misma imagen
+
+El usuario corrió de nuevo con los fixes anteriores y las 4 páginas que yo
+había confirmado "perfectamente legibles" (Araya Araya, Ferrada Muñoz,
+González González, Mizunuma Pool) SEGUÍAN sin dar ninguna fecha, pese a
+que el texto que yo obtuve con pytesseract sí daba resultado limpio con el
+regex ya arreglado. Esto confirma algo que el skill ya advertía como
+riesgo teórico (ver nota más arriba sobre "�") pero que acá se volvió
+real: **el motor OCR real del navegador (Tesseract.js) puede leer la MISMA
+imagen peor que pytesseract**, aunque a simple vista la página se vea
+perfecta -- son implementaciones/versiones distintas del mismo algoritmo
+base, no intercambiables para efectos de qué tan bien leen letra chica.
+
+**Lección dura**: nunca declarar "arreglado" ni dar una cifra final (tipo
+"49/49") basándose solo en texto capturado con pytesseract fuera del
+navegador -- eso prueba que el REGEX/LÓGICA es correcto, no que el OCR
+real del usuario va a producir un texto lo bastante limpio para que ese
+regex lo alcance a matchear. Frasear los hallazgos como "el regex ya
+soporta este formato, validado con texto real" en vez de "esto va a
+funcionar en tu navegador" -- son afirmaciones distintas y hay que ser
+explícito sobre cuál de las dos se está haciendo.
+
+**Fix estructural** (no otro ajuste de regex): se extendió la Fase 3
+(reintento a escala alta) para que, si el reintento con OCR a escala 4.0
+TAMPOCO da una fecha válida, pruebe con IA visual como último recurso
+(`va_iaLeerLicenciaMedica`, ya existía para la atribución de RUT/nombre,
+ahora también se usa para las fechas cuando ambos intentos de OCR
+fallan). La IA lee la imagen completa de la página en vez de depender de
+que el OCR carácter-por-carácter salga limpio -- no importa qué tan mal
+lea Tesseract.js el texto, la IA ve la misma imagen que vería una
+persona. Cada intento queda registrado en `va_iaAuditLog` con tipo
+`LICENCIA_MEDICA_REINTENTO` para poder auditar cuántas páginas
+necesitaron llegar hasta este último nivel.
+
+**También ajustado** (pedido del usuario): "Días que no coinciden con el
+LH" ahora incluye TANTO los casos donde se leyó un número distinto COMO
+los casos donde no se pudo leer ningún día -- antes estos últimos
+quedaban solo en la tabla separada de abajo ("páginas con fecha
+ilegible"), dando la impresión de que la tabla principal de discrepancias
+no traía todas las diferencias reales. Ambas siguen existiendo (la de
+abajo da el detalle de página/motivo), pero ahora "días no coinciden" es
+la vista consolidada de TODO lo que no calza, sin tener que cruzar dos
+tablas mentalmente.
