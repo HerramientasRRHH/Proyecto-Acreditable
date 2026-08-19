@@ -1812,3 +1812,64 @@ sandbox (mismas limitaciones de render/OCR ya documentadas arriba) --
 sintaxis verificada, lógica verificada por revisión de código + prueba con
 datos simulados. Pendiente que el usuario confirme tiempo real y que el
 Excel se vea bien en su máquina.
+
+## El bug real de "días no coinciden": el hueco del regex FONASA era demasiado angosto (encontrado renderizando páginas reales)
+
+Con el `.oxps` ya adjunto y el nombre-match arreglado, seguían apareciendo
+9-11 personas con "días no coinciden" -- esta vez SÍ hubo que entrar a la
+carpeta real (`licencia medica.pdf`, 75 páginas) y mirar el texto OCR
+página por página, siguiendo el proceso del skill (`fitz`/PyMuPDF +
+`pytesseract`, comparando contra el mismo regex que usa
+`va_extraerDatosLicencia` en producción).
+
+**Hallazgo**: el documento real de Antofagasta es mayormente un
+"Comprobante de Licencia Médica Electrónica" (FONASA), con las fechas como
+texto plano etiquetado -- `Fecha Inicio * DD-MM-AAAA ... Fecha término *
+DD-MM-AAAA` -- NO el formato viejo de casillas dígito-por-dígito de Minsal.
+Ya existía un regex para este formato, pero con un hueco de `{0,100}`
+caracteres entre "Fecha Inicio" y "Fecha término" para saltar la columna de
+Lugar/Dirección que el OCR mezcla en el medio. Midiendo las 51 apariciones
+reales de "Fecha Inicio" en el PDF, el hueco real va de 22 a 132
+caracteres -- **36 de 51 (70%) superan el cupo de 100** y fallan en
+silencio, dejando esa página con 0 días aportados aunque el RUT/nombre sí
+se haya atribuido bien. Caso real: Yañez Iriarte Guillermo Carlos tiene 2
+períodos (páginas 74 y 75) -- el de la página 75 (25 días de julio) se
+perdía por completo porque su dirección medía 125 caracteres, y el total
+quedaba en 6 (solo el período de la página 74) en vez de 31.
+
+También se midió el hueco chico entre CADA etiqueta y su propia fecha
+("Fecha Inicio" → primer dígito): normalmente 5-7 caracteres, pero hasta 36
+en algunos casos reales -- el cupo de 20 también se subió a 40.
+
+**Fix**: `{0,100}` → `{0,200}` para el hueco grande (Inicio↔término),
+`{0,20}` → `{0,40}` para los dos huecos chicos (línea ~10876 de
+index.html). Validado con el texto OCR real y exacto de la página 75 de
+Yañez (incluyendo el "95-08-2026" mal leído por OCR en vez de "05-08-2026"
+-- se confirmó que el desborde de fecha no rompe el conteo de días de
+julio, porque `va_diasLicenciaEnPeriodo` solo cuenta día por día si cae en
+el mes/año pedido, así que un rango demasiado largo por un dígito mal leído
+no suma de más, solo no resta): el resultado da exactamente los 25 días de
+julio esperados. También se confirmó anti-falso-positivo: la misma página
+tiene una sección 6 más abajo ("Desde 17-07-2026 ... Hasta 05-08-2026") que
+da un resultado DISTINTO -- el regex ampliado sigue tomando la sección 3
+correcta (Datos Reposo) y no la 6, porque el `[\s\S]{0,200}?` es lazy y
+para en la PRIMERA "Fecha término" que encuentra, no en cualquiera.
+
+**Metodología para seguir puliendo este tipo de lectura** (pedido explícito
+del usuario, para ir armando un catálogo reusable): el patrón que funcionó
+acá fue (1) confirmar el caso real con el panel de auditoría de IA que ya
+pegó el usuario en el chat (no hace falta el navegador para esto), (2)
+renderizar la página real exacta a texto con PyMuPDF+pytesseract
+(`scripts/`, ver ejemplo de este hallazgo) para ver el layout real del
+campo, (3) medir el hueco/patrón real contra TODAS las apariciones del
+mismo campo en el documento (no solo el caso que falló) para elegir un
+cupo que cubra la variabilidad real en vez de adivinar un número, (4)
+validar el fix con `va_extraerDatosLicencia` real en el navegador (no una
+réplica en Python -- ojo, una réplica en Python corrida en este entorno
+puede arrastrar artefactos de encoding con acentos que no reflejan lo que
+hace Tesseract.js en el navegador real, hay que preferir probar la función
+JS real cuando el texto tiene tildes/ñ). Cuando el usuario pida "que más
+adelante pueda leer con librerías" -- este archivo (FONASA, formato
+consistente y bien etiquetado) es un buen candidato a una extracción 100%
+por regex/estructura sin necesitar IA en absoluto, una vez que los cupos
+de los huecos estén bien calibrados contra suficientes casos reales.

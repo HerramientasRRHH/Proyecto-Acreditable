@@ -10864,9 +10864,22 @@ function va_extraerDatosLicencia(txt){
   // sale ilegible, pero las fechas Inicio/término salen limpias. Igual que con
   // el formato Mutual, calculamos los días del rango en vez de confiar en ese
   // campo. Separadores flexibles porque el OCR a veces come el guión (ej.
-  // "1506-2026" en vez de "15-06-2026").
+  // "1506-2026" en vez de "15-06-2026"). El hueco entre Inicio y término
+  // (que cae en medio de la dirección del trabajador, de largo variable) se
+  // midió contra las 51 apariciones reales en licencia medica.pdf: va de 22
+  // a 132 caracteres -- el cupo original de 100 dejaba 36/51 sin matchear
+  // (todas las direcciones largas), silenciando el aporte de días de esa
+  // página entera. Caso real confirmado: Yañez Iriarte Guillermo Carlos,
+  // página 75, hueco de 125 -- por esto su segundo período (25 días de
+  // julio) no se sumaba y solo quedaban los 6 del primer período (página 74).
+  // El hueco chico entre CADA etiqueta y su propia fecha (ej. "Fecha Inicio"
+  // hasta el primer dígito) también se midió real: normalmente 5-7
+  // caracteres, pero hay casos hasta 36 (probable ruido OCR extra en esa
+  // celda) -- el cupo de 20 ya dejaba algunos afuera, se sube a 40 por lo
+  // mismo (el de "Fecha término" mide como mucho 13, pero se sube igual por
+  // simetría/margen).
   if(!fechaInicio||!dias){
-    const mComp=txt.match(/Fecha\s+Inicio[\s\S]{0,20}?(\d{1,2})[-\s]?(\d{1,2})[-\s]?(\d{4})[\s\S]{0,100}?Fecha\s+t[eé]rmino[\s\S]{0,20}?(\d{1,2})[-\s]?(\d{1,2})[-\s]?(\d{4})/i);
+    const mComp=txt.match(/Fecha\s+Inicio[\s\S]{0,40}?(\d{1,2})[-\s]?(\d{1,2})[-\s]?(\d{4})[\s\S]{0,200}?Fecha\s+t[eé]rmino[\s\S]{0,40}?(\d{1,2})[-\s]?(\d{1,2})[-\s]?(\d{4})/i);
     if(mComp){
       const dIni=new Date(parseInt(mComp[3],10),parseInt(mComp[2],10)-1,parseInt(mComp[1],10));
       const dFin=new Date(parseInt(mComp[6],10),parseInt(mComp[5],10)-1,parseInt(mComp[4],10));
