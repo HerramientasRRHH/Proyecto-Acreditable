@@ -10898,7 +10898,15 @@ function va_extraerDatosLicencia(txt){
     // Separador flexible incluye "." además de "-"/espacio -- caso real:
     // página 49 (Pino Lagos) lee "Fecha término * 25.07-2026" con punto en
     // vez de guión entre día y mes.
-    const mComp=txt.match(/Fecha\s+Inicio[\s\S]{0,40}?(\d{1,2})[-.\s]?(\d{1,2})[-.\s]?(\d{4})[\s\S]{0,200}?Fecha\s+t[eé]rmino[\s\S]{0,40}?(\d{1,2})[-.\s]?(\d{1,2})[-.\s]?(\d{4})/i);
+    // (?<![\d.]) antes de cada grupo de día: sin esto, un número corrupto
+    // con un dígito de más (ej. OCR real "229.07-2026" en vez de
+    // "22-07-2026") deja que el regex arranque a mitad del número ("29" en
+    // vez de fallar), colando una fecha equivocada -- mismo bug ya
+    // documentado y arreglado en va_findAllRuts para RUTs pegados a montos.
+    // Con el candado, este caso ahora no matchea acá y cae al fallback de
+    // Inicio+N°Días, que sí da el valor correcto (confirmado con el caso
+    // real de Santana Herrera).
+    const mComp=txt.match(/Fecha\s+Inicio[\s\S]{0,40}?(?<![\d.])(\d{1,2})[-.\s]?(\d{1,2})[-.\s]?(\d{4})[\s\S]{0,200}?Fecha\s+t[eé]rmino[\s\S]{0,40}?(?<![\d.])(\d{1,2})[-.\s]?(\d{1,2})[-.\s]?(\d{4})/i);
     if(mComp){
       const dIni=new Date(parseInt(mComp[3],10),parseInt(mComp[2],10)-1,parseInt(mComp[1],10));
       const dFin=new Date(parseInt(mComp[6],10),parseInt(mComp[5],10)-1,parseInt(mComp[4],10));
@@ -10925,8 +10933,14 @@ function va_extraerDatosLicencia(txt){
   // esta casilla que venga evidentemente pegada con ruido de otra columna
   // (ya sabemos que esta casilla en particular es la menos confiable).
   if(!fechaInicio||!dias){
-    const mIniSolo=txt.match(/Fecha\s+Inicio[\s\S]{0,40}?(\d{1,2})[-.\s]?(\d{1,2})[-.\s]?(\d{4})/i);
-    const mDiasSolo=txt.match(/N[ºo°*]?\s*D.AS\D{0,10}?(\d{1,3})\b/i);
+    // "Inicio de Reposo" (formato MEDIPASS) como alternativa a "Fecha
+    // Inicio" -- caso real: Mizunuma Pool, página 33, donde la sección 1
+    // del documento repite la fecha SIN el ruido que sí tiene la sección 3
+    // ("Fecha Inicio: 38-07-2026" corrupto vs "Inicio de Reposo:
+    // 09-07-2026" limpio, mismo documento). "N[°o]? de días" con "de"
+    // opcional por el mismo motivo.
+    const mIniSolo=txt.match(/(?:Fecha\s+Inicio|Inicio\s+de\s+Reposo)[\s\S]{0,40}?(\d{1,2})[-.\s]?(\d{1,2})[-.\s]?(\d{4})/i);
+    const mDiasSolo=txt.match(/N[ºo°*]?\s*(?:de\s*)?D.AS\D{0,10}?(\d{1,3})\b/i);
     if(mIniSolo&&mDiasSolo){
       const dIni2=new Date(parseInt(mIniSolo[3],10),parseInt(mIniSolo[2],10)-1,parseInt(mIniSolo[1],10));
       const diasSolo=parseInt(mDiasSolo[1],10);

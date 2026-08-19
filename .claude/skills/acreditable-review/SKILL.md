@@ -2105,3 +2105,76 @@ final necesite mostrar. Las dos secciones de arriba ("días que no
 coinciden" y "páginas con fecha ilegible") se mantienen. El log
 (`va_iaAuditLog`) sigue completo internamente y en el Excel exportado, solo
 se dejó de renderizar en el panel de esta pestaña.
+
+## "¿Qué falta para 49/49?" -- mirar las páginas reales como IMAGEN (no solo texto OCR) destapó 3 bugs más y una lección de metodología
+
+El usuario preguntó directo qué hacía falta para llegar a 49/49. En vez de
+seguir iterando a ciegas sobre texto OCR, se renderizaron las 7 páginas
+reales que seguían fallando a PNG (`fitz`, matrix 2.2) y se miraron
+literalmente como imagen con el tool `Read` (paso 3.5 del proceso de este
+skill) -- reveló que casi todas eran perfectamente legibles a simple vista,
+lo que apuntaba a bugs de código, no de calidad de escaneo:
+
+1. **Trampa de mi propia metodología de testing**: los primeros intentos
+   de reproducir el texto OCR real en Python vía `print()`/Bash mostraban
+   "�" (U+FFFD) en vez de tildes -- confundí esto con corrupción real del
+   OCR y perdí tiempo pensando que "Fecha término" no se reconocía por eso.
+   Guardando el mismo OCR a un archivo con `encoding='utf-8'` y leyéndolo
+   con el tool `Read` (en vez de imprimir por consola), las tildes salían
+   perfectas -- el "�" era 100% un artefacto de la consola de Windows en
+   este entorno, nunca algo que Tesseract.js seguiría el navegador real.
+   **Lección: para depurar texto OCR con tildes/ñ, siempre guardar a
+   archivo UTF-8 y leer con `Read`, nunca confiar en lo que imprime la
+   consola de este entorno.**
+
+2. **Bug real: dos formatos más sin regex propio.** Página 24/25
+   (González González) resultó ser "ORDEN DE REPOSO LEY N° 16.744" (Mutual
+   de Seguridad/ACHS) -- formato que YA tenía regex (`Fecha de Reposo
+   Laboral Desde/Hasta`), simplemente no se había verificado contra este
+   caso real todavía; funcionó perfecto al probarlo. Página 33 (Mizunuma
+   Pool) es formato MEDIPASS, con la fecha repetida DOS VECES en el mismo
+   documento -- una limpia arriba ("Inicio de Reposo: 09-07-2026") y otra
+   con ruido de OCR más abajo ("Fecha Inicio: 38-07-2026", sección
+   "Datos de reposo"). Se agregó "Inicio de Reposo" como alias de
+   "Fecha Inicio" en el fallback Inicio+N°Días -- como aparece ANTES en el
+   texto, el regex la encuentra primero y nunca llega a necesitar la
+   versión corrupta.
+
+3. **Bug real más sutil, encontrado recién al re-testear TODO junto**: el
+   candado de huecos que ya existía (`{0,40}`/`{0,200}`) no evita que el
+   regex arranque el grupo de dígitos A MITAD de un número corrupto -- caso
+   real Santana Herrera: OCR real dio "229.07-2026" en vez de "22-07-2026"
+   (un "9" de más). Como el separador es opcional, el motor de regex
+   simplemente "resbala" un carácter y arranca en "29" en vez de fallar --
+   coló un día equivocado (29 en vez de 22) DESPUÉS de que el tope de 200
+   días ya lo dejaba pasar como válido. Se agregó `(?<![\d.])` antes de
+   cada grupo de día (mismo patrón anti-"regex se come el número vecino"
+   ya usado en `va_findAllRuts` para RUTs pegados a montos) -- con esto,
+   el intento a mitad de número ya no matchea, y la página cae
+   correctamente al fallback Inicio+N°Días, que sí da el valor real.
+
+**Validado**: batería de 8 casos reales juntos (los 4 nuevos + Santana +
+Pino Lagos + los 2 casos de regresión ya confirmados antes) -- 8/8 dan el
+resultado esperado con la versión final del código.
+
+**Nota de entorno importante**: el servidor `python -m http.server` no
+manda cabeceras `no-cache`, así que el navegador puede servir una copia
+vieja de `index.html` desde caché incluso con `navigate force:true` --
+hay que agregar un query string distinto cada vez (`?v=<algo>`) para
+forzar la recarga real, y confirmar con algo como
+`fn.toString().includes('texto que se acaba de agregar')` antes de confiar
+en cualquier resultado de prueba. Esto costó tiempo real esta sesión (un
+fix que ya estaba en el archivo parecía "no funcionar" porque el navegador
+seguía corriendo la versión anterior).
+
+**Con estos fixes, la expectativa realista para 49/49**:
+- Los 4 casos que solo necesitaban lectura mejor (Araya Araya, Ferrada
+  Muñoz, González González, Mizunuma Pool) deberían resolverse solos en la
+  próxima corrida real -- validado con el texto real de cada uno.
+- Santana Herrera y Rojas Flores (diferencias chicas, 1-9 días) deberían
+  mejorar bastante o cerrar del todo con el fix del candado `(?<![\d.])`.
+- Vilca Taipe es el único caso confirmado como NO resoluble por más que se
+  mejore el código: su segundo período (10-07 a 01-10, 84 días) tiene CERO
+  apariciones de su RUT en las 75 páginas del PDF escaneado -- ese dato
+  físicamente no está ahí. Solo el `.oxps` lo tiene. Sin ese archivo
+  adjunto, 49/49 no es alcanzable para ella pase lo que pase con el código.
