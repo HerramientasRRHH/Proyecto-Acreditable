@@ -1683,3 +1683,43 @@ real solo se puede confirmar en un navegador de verdad (Chrome de
 escritorio del usuario), que es justo el siguiente paso pendiente: el
 usuario dijo que lo iba a probar en la página real antes de aprobar el
 push a GitHub/Render.
+
+## Actualización: se agregó respaldo de IA visual a Licencias Médicas (no existía)
+
+El usuario probó el fix del `.oxps` en local (`http://localhost:8080/index.html`,
+confirmado que SÍ era la versión correcta) y el caso de Pelaez Pelaez Ana
+Leonor seguía sin resolver -- pero probando `va_addRut` directo en consola
+contra su fila real, el candidato correcto SÍ se generaba. La explicación
+más probable: esa corrida de prueba no tenía adjunto el `.oxps` (solo
+`licencia medica.pdf`), así que el fix de esa fila nunca se ejecutó -- su
+única vía de lectura ahí es el comprobante individual escaneado dentro del
+PDF, un formulario DIAT/DIEP donde el OCR puede fallar sin ningún respaldo,
+porque **Licencias Médicas nunca llamaba a la IA (MiniMax)**, a diferencia
+de Contratos/Libro/Exenciones que sí tienen un nivel de respaldo visual.
+
+Se agregó ese nivel (mismo patrón "escalera de confianza" que
+`va_validarExenciones`): si una página queda sin RUT reconocido por OCR
+normal, checksum, NI el RUN recortado, y hay key de MiniMax configurada,
+se manda la página como imagen a la IA (`va_iaLeerLicenciaMedica`, nuevo
+helper cerca de `va_iaLeerNombreRut`, ~línea 11228) pidiendo el MISMO
+esquema JSON que ya usa `licMedIA` dentro de `va_validarLiquidaciones`
+(`{"nombre_trabajador","fecha_inicio","fecha_termino","numero_dias"}`) --
+mantiene consistencia entre ambos módulos. El nombre leído se cruza con
+`va_matchNombreNomina` contra el LH (más confiable que el RUT en formularios
+de mala calidad); si matchea, se usan las fechas/días que trajo la IA para
+el cálculo de "días en el período" en vez de re-intentar extraerlos del
+texto OCR (que ya sabemos que salió ilegible en ese caso). Cada intento
+queda en `va_iaAuditLog` con módulo `'Licencias Médicas'`, y
+`va_renderLicencias()` ahora muestra el banner de páginas leídas con IA +
+`va_renderIAAuditSection('Licencias Médicas')`, igual que Exenciones.
+
+Validado: sintaxis OK. La conexión real con MiniMax se probó con una imagen
+sintética (canvas con texto dibujado a mano, sin pasar por el render de PDF)
+-- respondió en 2.8s con el JSON exacto esperado, incluso calculando bien
+los días entre las dos fechas. **No se pudo probar contra una página PDF
+real en este sandbox**: `page.render()` a canvas (el mismo paso que ya usa
+`va_ocrPaginaMejorRotacion`, no es código nuevo) quedó colgado >80s sin
+completar -- limitación de renderizado de PDF ya documentada para este
+entorno específico, independiente de si hay OCR o IA de por medio. Pendiente
+que el usuario confirme en su navegador real que la IA efectivamente
+resuelve el caso de Pelaez cuando el `.oxps` no está adjunto.

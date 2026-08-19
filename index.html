@@ -11247,6 +11247,41 @@ async function va_iaLeerNombreRut(page,promptExtra){
     return JSON.parse(m[0]);
   }catch(e){console.warn('IA leer nombre/RUT falló:',e);return null;}
 }
+// Mismo esquema JSON que licMedIA en va_validarLiquidaciones (tipo
+// LICENCIA_MEDICA) -- se reusa el prompt para que ambos módulos queden
+// consistentes. Devuelve {nombre,fechaInicio,fechaTermino,numeroDias} o
+// null si la IA no pudo leer nada útil en la página.
+async function va_iaLeerLicenciaMedica(page){
+  const vp=page.getViewport({scale:2.2});
+  const canvas=document.createElement('canvas');
+  canvas.width=vp.width;canvas.height=vp.height;
+  await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+  const blob=await new Promise(res=>canvas.toBlob(res,'image/png',0.85));
+  const base64=await new Promise(res=>{
+    const reader=new FileReader();
+    reader.onloadend=()=>res(reader.result.split(',')[1]);
+    reader.readAsDataURL(blob);
+  });
+  const prompt='Esta es una página de un formulario chileno de Licencia Médica '+
+    '(Minsal, COMPIN, Mutual, ISAPRE, o un listado tabular de licencias con '+
+    'columnas RUT/Nombre/Fechas/Días). Decime en JSON: {"nombre_trabajador":"...",'+
+    '"fecha_inicio":"DD-MM-AAAA","fecha_termino":"DD-MM-AAAA","numero_dias":N} '+
+    '(las fechas del período de reposo; si no las ves con certeza, usá null). '+
+    '"numero_dias" es el número de días de reposo tal como aparece impreso '+
+    '(casillas "N° DE DÍAS" o similar) -- leelo directo de esa casilla aunque no '+
+    'veas la fecha de término; si no ves esa casilla, usá null. El documento es '+
+    'del año '+String(va_periodoAnio||'')+' -- si la casilla de año solo trae 2 '+
+    'dígitos, completá con ese año, no adivines otro. Si no hay ningún trabajador '+
+    'identificable en la página, respondé {"nombre_trabajador":null}.';
+  try{
+    const texto=await va_iaLeerImagen(base64,prompt);
+    const m=texto.match(/\{[\s\S]*\}/);
+    if(!m)return null;
+    const p=JSON.parse(m[0]);
+    return{nombre:p.nombre_trabajador||null,fechaInicio:p.fecha_inicio||null,
+      fechaTermino:p.fecha_termino||null,numeroDias:Number.isFinite(p.numero_dias)?p.numero_dias:null};
+  }catch(e){console.warn('IA leer Licencia Médica falló:',e);return null;}
+}
 
 // ── PASO 1: LH ──
 async function va_cargarLH(file){
@@ -12402,6 +12437,12 @@ async function va_validarLicenciasMedicas(){
     va_docResults['licencias']={nombre:'Licencias Médicas',cargado:false,estado:'—'};return;
   }
   const lhRutSet=new Set(va_lhFiltered.map(x=>x.rutNorm));
+  // Nivel 2 (IA visual): solo se gasta en páginas que ninguno de los métodos
+  // gratis (OCR normal, checksum, RUN recortado) logró atribuir a alguien de
+  // la nómina, y solo si hay key de MiniMax configurada. Mismo patrón que
+  // va_validarExenciones.
+  const iaKeyOk=!!(document.getElementById('iav-key')&&document.getElementById('iav-key').value);
+  let paginasIALic=0;
   // Extraído a helper para poder reusarlo tanto en páginas de PDF como en el
   // texto completo de un .oxps (que no tiene "páginas" en el mismo sentido —
   // el listado tabular real llega ahí completo de una vez). Devuelve cuántas
@@ -12532,9 +12573,36 @@ async function va_validarLicenciasMedicas(){
         const rutValidado=va_extraerRutConChecksum(runTxt,lhRutSet);
         if(rutValidado){va_licMedRuts.add(rutValidado);rutFinal=rutValidado;}
       }
-      // Días que la licencia de ESTA página aportan al mes auditado
+      // Nivel 2: IA visual -- solo si sigue sin rutFinal y hay key configurada.
+      // El nombre que devuelve la IA es más confiable que el RUT en formularios
+      // manuscritos/escaneados de mala calidad, mismo principio que Exenciones.
+      let datosIA=null;
+      if(!rutFinal&&iaKeyOk){
+        paginasIALic++;
+        const leidoIA=await va_iaLeerLicenciaMedica(page);
+        if(leidoIA&&leidoIA.nombre){
+          const matchIA=va_matchNombreNomina(leidoIA.nombre,va_lhFiltered);
+          va_iaAuditLog.push({modulo:'Licencias Médicas',pagina:p,tipo:'LICENCIA_MEDICA',
+            nombreLeido:leidoIA.nombre,resultado:matchIA?'match':'sin_match',
+            atribuidoA:matchIA?matchIA.nombre:null,
+            motivo:matchIA?null:'nombre leído por IA no coincide con ningún trabajador de la nómina'});
+          if(matchIA){
+            rutFinal=matchIA.rutNorm;
+            va_licMedRuts.add(rutFinal);
+            datosIA={fechaInicio:va_parseFechaDDMMYYYY(leidoIA.fechaInicio||''),dias:leidoIA.numeroDias};
+          }
+        }else if(leidoIA){
+          va_iaAuditLog.push({modulo:'Licencias Médicas',pagina:p,tipo:'LICENCIA_MEDICA',
+            nombreLeido:null,resultado:'sin_lectura',atribuidoA:null,
+            motivo:'la IA no identificó ningún trabajador en la página'});
+        }
+      }
+      // Días que la licencia de ESTA página aportan al mes auditado -- si la
+      // IA fue quien resolvió esta página, usamos sus propias fechas/días en
+      // vez de re-extraerlos del texto OCR (que en ese caso ya sabemos que
+      // salió ilegible, por eso se llegó hasta acá).
       if(rutFinal&&va_periodoMes&&va_periodoAnio){
-        const datos=va_extraerDatosLicencia(txt);
+        const datos=datosIA||va_extraerDatosLicencia(txt);
         const dEnPeriodo=va_diasLicenciaEnPeriodo(datos.fechaInicio,datos.dias,va_periodoMes,va_periodoAnio);
         if(dEnPeriodo!=null){
           // Si el trabajador tiene varias licencias en el mismo mes, se suman
@@ -12565,6 +12633,7 @@ async function va_validarLicenciasMedicas(){
     totalLH:conLicLH.length,cubiertos:cubiertos.length,
     faltantes:faltantes.map(x=>({rut:x.rut,nombre:x.nombre,diasLic:x.diasLic})),
     diasNoCoinciden:diasNoCoinciden.map(x=>({rut:x.rut,nombre:x.nombre,diasLH:x.diasLic,diasDoc:va_licMedDiasPorRut.get(x.rutNorm)})),
+    paginasIA:paginasIALic,
     estado:(faltantes.length===0&&diasNoCoinciden.length===0)?'✅':((faltantes.length+diasNoCoinciden.length)<=2?'⚠':'❌')
   };
 }
@@ -14902,6 +14971,9 @@ function va_renderLicencias(){
     <div class="ch-kpi ok"><div class="v">${d.cubiertos||0}</div><div class="l">Con doc adjunto</div></div>
     <div class="ch-kpi${(d.faltantes||[]).length>0?' err':''}"><div class="v">${(d.faltantes||[]).length}</div><div class="l">Sin doc</div></div>
   </div>`;
+  if(d.paginasIA){
+    h+=`<div style="background:#f2f7ff;border:1px solid #cfe0f5;border-radius:7px;padding:6px 12px;margin-bottom:10px;font-size:.72rem;color:#375;display:inline-block">🔧 ${d.paginasIA} página(s) sin RUT reconocible se verificaron con IA visual (ver detalle abajo)</div><br>`;
+  }
   if((d.faltantes||[]).length>0){
     h+='<div class="ch-section-title" style="color:#c0392b">⚠ Licencias sin documento adjunto</div>';
     h+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th><th>Días Lic</th></tr></thead><tbody>';
@@ -14914,6 +14986,7 @@ function va_renderLicencias(){
     d.diasNoCoinciden.forEach(f=>{h+=`<tr><td style="font-size:.7rem">${f.rut}</td><td style="font-size:.72rem">${f.nombre}</td><td style="text-align:center">${f.diasLH}</td><td style="text-align:center">${f.diasDoc}</td></tr>`;});
     h+='</tbody></table>';
   }
+  h+=va_renderIAAuditSection('Licencias Médicas');
   return h;
 }
 
