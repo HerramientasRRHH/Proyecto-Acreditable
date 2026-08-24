@@ -2165,7 +2165,14 @@ function esFichaIngreso(textoNorm){
 const TITULOS_DOC_COMPACTOS=[
   'anexodecontratodetrabajo','anexoalcontratoindividualdetrabajo',
   'contratodetrabajo','contratoindividualdetrabajo',
-  'finiquitodecontrato','notificaciondeamonestacion','amonestacionescrita',
+  // "Finiquito al contrato de trabajo" es el título que usa Núcleo/Akro en
+  // los finiquitos legalizados — compactado NO coincide con
+  // 'finiquitodecontrato', así que sin esta entrada el corte no se disparaba
+  // nunca y las páginas se agrupaban solo por el tope de PAGINAS_ESPERADAS
+  // (caso real 24-08-2026: "Fin legalizados.pdf", 8 finiquitos de 1 página
+  // cada uno, salían como 2 archivos de 2 y 6 páginas).
+  'finiquitoalcontrato','finiquitodecontrato','finiquitodetrabajo',
+  'notificaciondeamonestacion','amonestacionescrita',
   'certificadodevacaciones','certificadodenacimiento',
   'certificadodealumnoregular','fichaingresopersonalnuevo',
   'pactodehorasextraordinarias','pactodeintegridad',
@@ -2173,7 +2180,11 @@ const TITULOS_DOC_COMPACTOS=[
 ];
 function esInicioFuerteDoc(texto){
   const lineas=(texto||'').split('\n').map(l=>l.trim()).filter(l=>l);
-  const encC=normCompacto(lineas.slice(0,8).join(' '));
+  // 12 líneas y no 8: en los finiquitos legalizados el título va después del
+  // logo, la sucursal y el sello de notaría, y el OCR suele intercalar además
+  // ruido del margen. Los títulos de TITULOS_DOC_COMPACTOS son lo bastante
+  // específicos como para que ampliar la ventana no genere falsos positivos.
+  const encC=normCompacto(lineas.slice(0,12).join(' '));
   return TITULOS_DOC_COMPACTOS.some(t=>encC.includes(t));
 }
 
@@ -3876,6 +3887,46 @@ function doc_extraerNombreDesdeTexto(textoCompleto){
   function esIgnorado(nombre){
     const nl = normL(nombre);
     return IGNORAR_NOMBRES.some(ig => nl.includes(ig));
+  }
+
+  // E0b: VOTACION POR REPETICION - corre ANTES que todo lo demas.
+  // En un finiquito el nombre del trabajador aparece cuatro o cinco veces
+  // ("y Don X Rut,", "PRIMERO: Don X declara", "SEGUNDO: Don X declara",
+  // "CUARTO: Don X, deja expresa constancia", y al pie junto al RUT). En
+  // cambio el ruido del OCR -sobre todo el sello vertical de la notaria que
+  // corre por el margen derecho- aparece UNA sola vez y sale distinto cada
+  // vez. Asi que un nombre que se repite 3 veces o mas es el trabajador, y le
+  // gana a cualquier basura que los escalones de abajo pudieran agarrar
+  // primero. Caso real (24-08-2026, "Fin legalizados.pdf"): la pagina 1 salia
+  // como "Esaldus Ej Owsifesied Osjpnn", que era el sello leido de costado.
+  // El umbral de 3 es deliberado: en un anexo o contrato al trabajador se lo
+  // nombra una o dos veces, asi que ahi este escalon NO dispara y el flujo
+  // sigue por E1/E2 como siempre.
+  const patRepetido = /\b[Dd][Oo][Nn\u00d1\u00f1][Aa\u00c1\u00e1]?\b\s*(?:\(\s*[a-z\u00f1A-Z\u00d1]{0,3}\s*\)\s*)?((?:[A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1][A-Za-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1\u00c1\u00c9\u00cd\u00d3\u00da\u00d1'\u2019\-]*\.?\s+){1,4}[A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1][A-Za-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1\u00c1\u00c9\u00cd\u00d3\u00da\u00d1'\u2019\-]+)/g;
+  const votos = new Map();
+  let mv;
+  while((mv = patRepetido.exec(txt)) !== null){
+    const raw = mv[1].replace(/\s+/g,' ').trim();
+    if(esIgnorado(raw)) continue;
+    const toks = limpiarTokens(raw.split(/\s+/)).slice(0,4);
+    if(toks.length < 2) continue;
+    const clave = normL(toks.join(' '));
+    const prev = votos.get(clave);
+    votos.set(clave, {n:(prev?prev.n:0)+1, toks: prev?prev.toks:toks});
+  }
+  if(votos.size){
+    let mejor=null, segundo=0;
+    for(const v of votos.values()){
+      if(!mejor || v.n > mejor.n){ segundo = mejor?mejor.n:0; mejor = v; }
+      else if(v.n > segundo) segundo = v.n;
+    }
+    // Ademas de repetirse tiene que GANAR con claridad: si dos nombres
+    // distintos aparecen la misma cantidad de veces, la pagina probablemente
+    // trae dos trabajadores y es mas honesto dejar que decidan los escalones
+    // especificos que elegir uno al azar.
+    if(mejor && mejor.n >= 3 && mejor.n > segundo){
+      return doc_capitalizar(doc_invertirOrden(mejor.toks).join(' '));
+    }
   }
 
   // E0: CertificadoVacaciones → "Funcionario : Catalina Del Carmen Pino Andrade"

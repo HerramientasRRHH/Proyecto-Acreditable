@@ -182,3 +182,54 @@ pdf.js de estas páginas escaneadas no termina (limitación conocida del entorno
   auditar POR QUÉ el motor marcaba a alguien como legalizado. Ahora baja el detalle completo
   por trabajador (página, respaldos detectados, evidencia del sello), el respaldo incompleto,
   las páginas sin verificar y el detalle de lectura con IA de los dos módulos nuevos.
+
+---
+
+## 24-08-2026 — Renombrador: finiquitos legalizados de Núcleo no se cortaban
+
+Documento real: `Downloads\Fin legalizados.pdf` — 8 páginas, **0% texto
+nativo**, y cada página es un finiquito COMPLETO de un trabajador distinto
+(verificado renderizando las 8 a PNG). Salían agrupadas como 2 archivos
+(págs 1-2 y 3-8).
+
+**Por qué no cortaba**: el título de estos finiquitos es
+`Finiquito al contrato de trabajo`, que compactado da
+`finiquitoalcontratodetrabajo`. `TITULOS_DOC_COMPACTOS` solo tenía
+`finiquitodecontrato`, así que `esInicioFuerteDoc()` devolvía `false` y el
+corte por título nunca se disparaba. Los grupos que se veían (2 y 6 páginas)
+venían del tope `PAGINAS_ESPERADAS['Finiquito']=[2,6]` vía `yaCompleto`, no
+de haber reconocido nada. Fix: agregar `finiquitoalcontrato`,
+`finiquitodetrabajo`. Reproducido con 8 páginas y 2 RUTs ilegibles: **antes 6
+grupos, ahora 8**.
+
+Se subió además la ventana de `esInicioFuerteDoc` de 8 a 12 líneas: en estos
+finiquitos el título va después del logo, la sucursal y el sello, y el OCR
+intercala ruido del margen.
+
+**Nombre inventado por el sello de notaría**: la página 1 salía como
+`Esaldus Ej Owsifesied Osjpnn`. Estos finiquitos llevan un sello vertical
+impreso a lo largo del margen derecho, que Tesseract lee de costado y
+convierte en galimatías; ese ruido caía dentro de la ventana de alguno de los
+escalones de nombre.
+Fix: **escalón E0b, votación por repetición**, que corre antes que todos los
+demás. En un finiquito el trabajador se nombra 4-5 veces (`y Don X Rut,`,
+`PRIMERO: Don X declara`, `SEGUNDO: Don X declara`, `CUARTO: Don X, deja
+expresa constancia`, y al pie junto al RUT), mientras que el ruido del sello
+aparece una sola vez y distinto cada vez. Si un mismo nombre se repite **3
+veces o más** y además gana con claridad (nadie empatado), ése es el
+trabajador.
+El umbral de 3 es deliberado: en anexos y contratos al trabajador se lo nombra
+una o dos veces, así que ahí E0b **no dispara** y el flujo sigue por E1/E2 —
+verificado, los 6 casos de anexos siguen dando 6/6.
+
+Validado con el texto real de las páginas 1, 3 y 5 (incluyendo el ruido del
+sello intercalado a mano): los tres nombres salen correctos
+(`Munoz Rubilar Jonathan Andres`, `Aramburu Pardo Karla Elena`,
+`Caldas Vidal Cesar Augusto`), el tipo sale `Finiquito`, y `ren_elegirRut`
+elige el RUT del trabajador descartando el de la empresa (96.816.640-9) y el
+del representante (8.225.115-4).
+
+**Nota sobre `PAGINAS_ESPERADAS['Finiquito']=[2,6]`**: estos finiquitos son de
+1 página, así que caerían en `POCAS_PAG`. Los salva la regla `unaPagCompleta`
+(1 página + título propio + RUT propio = documento completo). Un finiquito de
+1 página SIN RUT legible sigue advirtiendo, que es lo correcto.
