@@ -1217,3 +1217,60 @@ Resultado medido con la corrida real del usuario (solo Mujeres +
 Discapacidad adjuntados): el informe paso de **6 paginas** con la mitad
 dedicada a Liquidaciones inexistentes, a **2 paginas** que hablan solo de lo
 que se subio.
+
+## 23-08-2026 — Coherencia del IMPUT: el "Libro Haberes" embebido gobierna las dinámicas
+
+Pedido del usuario: *"es un excel con tablas dinámicas el cual lo gobierna el Libro de haberes, pero
+la gracia es que esté actualizado y que todas sus hojas sean coherentes, o que reporte que está
+mal"*.
+
+El IMPUT real (`Imput del mes de julio.xlsx`, 11 hojas, 341 trabajadores) es una hoja fuente
+**`Libro Haberes`** (encabezados en la fila 6, igual que el LH suelto) más 10 vistas derivadas:
+MATRIZ, CARGO, DISCAPACIDAD, MUJERES, JUBILADOS, IMPOSITIVOS, CONTRATOS, FINIQUITADOS,
+LICENCIA MEDICA, VACACIONES. Dos cosas pueden fallar y ninguna se veía antes:
+
+1. **IMPUT desactualizado** — su hoja `Libro Haberes` no coincide con el LH que se subió.
+2. **Dinámicas sin refrescar** — la hoja fuente está bien pero los pivotes muestran el recorte de
+   una versión anterior.
+
+`va_imputCoherencia` chequea las dos: la primera contra `va_lhAll`, la segunda recalculando el
+subconjunto esperado de cada hoja desde la propia hoja `Libro Haberes`.
+
+**El hallazgo que evita un reporte lleno de falsos positivos**: las hojas derivadas **NO están
+filtradas por sub-área** — cubren el Libro Haberes completo. Comparar contra `va_lhFiltered` (que sí
+filtra por `Antofagasta Ciudad 2022`) marcaba **5 de 7 hojas como incoherentes** por 3 personas de
+la sub-área `Base Antofagasta AK` (Torrejón Campusano, Alfaro Díaz, Opazo Díaz) que están en el
+Libro pero fuera del sector auditado. Con el alcance corregido al Libro Haberes entero: **7/7 hojas
+coherentes**. Moraleja general: antes de declarar una diferencia como error, verificá que los dos
+conjuntos tengan el mismo ALCANCE.
+
+Columnas usadas de `Libro Haberes` (se buscan por nombre de encabezado, no por índice): Número de
+Documento, Nombre Completo, Fecha Ingreso Compañía, Fecha Término Trabajo, Sexo, Nombre Sub-área
+Asignada(o), En Situación de Discapacidad, Fondo de Cotización, Días Licencias (reales).
+
+Ojo con los nombres de hoja: vienen con espacios de más (`" CONTRATOS"`, `"FINIQUITADOS "`), por eso
+el match usa `String(s).trim()`.
+
+**Resultado sobre el archivo real de julio**: actualizado (341 = 341, 0 diferencias) y 7/7 hojas
+coherentes — MATRIZ 341, MUJERES 170, DISCAPACIDAD 6, JUBILADOS 94, FINIQUITADOS 11, CONTRATOS 9,
+LICENCIA MEDICA 50. Idéntico en el prototipo Python y en el JS real corrido en el navegador.
+
+**Control negativo** (sin esto no se puede afirmar que el detector sirva): sacando una fila de
+MUJERES lo reporta como `faltan 1` nombrando a la persona; agregando alguien al LH lo reporta como
+`actualizado=false`. El render marca ❌ solo en esos casos.
+
+## 23-08-2026 — Antofagasta: tres casillas que se sacaron
+
+Pedido del usuario. Las tres se quitaron de `VA_BASES.Antofagasta.docs`, de las pestañas y de
+`va_ejecutar`:
+
+- **Carta No Firma** — viene DENTRO del PDF de Liquidaciones. Ya había detección inline
+  (`liq.tieneCartaNoFirmaLiq`); el slot era la segunda de dos vías y `va_clasificar` sigue
+  aceptando la inline. Confirmado en el archivo real: `A. Liquidaciones letra A.pdf` trae esas
+  cartas intercaladas en las páginas 11, 21 y 26.
+- **Carta Fe de Erratas** — se quitó también la validación (decisión explícita del usuario). El
+  parser `va_parseCartaFeErratas` y su render se mantienen porque Vitacura tiene su propio slot
+  `libroasist_carta`.
+- **Acreditación Mujeres** — la dotación femenina ya sale del Libro de Haberes (columna Sexo, ver
+  `va_resumenLH`, que la muestra en los KPIs) y de la hoja MUJERES del IMPUT. Pedir un PDF aparte
+  duplicaba lo mismo.

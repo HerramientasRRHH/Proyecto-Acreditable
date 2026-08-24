@@ -747,3 +747,64 @@ lo que quedaba contradictorio al lado del cruce nuevo ("29 días trabajados... l
 navegador — resultados idénticos en los 11 casos. Los 3 prompts nuevos probados contra el endpoint
 real de MiniMax con las imágenes reales. **Sin corrida completa todavía**: falta que el usuario corra
 y confirme cuántos `SIN_FIRMA` bajan por el líquido $0 y cuántas discrepancias de días/monto quedan.
+
+## 23-08-2026 — Días trabajados: anclar en la ETIQUETA, no en la palabra "días"
+
+Reporte del usuario: *"las liquidaciones de sueldo están teniendo un problema, algunas al leer los
+días trabajados"*. Medido sobre el Excel de la corrida real: de 459 filas, **98 (21.4%) decían
+"no se pudo leer en la liquidación"** y 0 daban discrepancia.
+
+La versión anterior de `va_extraerDiasTrabajadosLiq` exigía que **después** del número apareciera la
+palabra "días" (con una lista cerrada de variantes de OCR) y recién ahí miraba la etiqueta. Sobre el
+OCR real (escala 3.0, la misma que usa `va_validarLiquidaciones` inline) eso falla seguido:
+
+| Lo que lee el OCR | Por qué fallaba |
+|---|---|
+| `Días Trabajados: 30'días` | apóstrofe pegado al número, `\s*` no lo cubre |
+| `Días Trabajados: 30 dízs` | "dízs" no estaba en la lista de variantes |
+| `Días Trabajados: 30 díaz` | termina en z |
+| `Bías Trabajados: 30 sas` | ni la etiqueta ni "días" son legibles, pero `Trabajados: 30` sí |
+| `Días Tralaiados: 30 días` | etiqueta a distancia 6, la tolerancia era 5 |
+
+**Fix**: se ancla en la etiqueta (`DIASTRABAJADOS`, Levenshtein ≤ 4 sobre las últimas 14 letras
+antes del número) y se toma el primer número 0–31 que le sigue. La palabra "días" posterior pasa a
+ser decoración y ya no se exige.
+
+**Dos trampas que costaron una iteración cada una** — la primera versión "mejorada" devolvía 0 en 12
+páginas que la vieja leía bien:
+
+1. **La "O" de "TrabajadOs" se leía como un cero.** O es una lectura válida de 0, así que el regex
+   la tomaba y la etiqueta a su izquierda (`...DIASTRABAJAD`) quedaba a distancia 4 — dentro de
+   tolerancia. Lo bloquea un lookbehind de letra: `(?<![A-Za-z\d.,])`.
+2. **`Horas no Trabajadas: 0 horas` queda a distancia 5 de `DIASTRABAJADOS`** — más cerca que varias
+   etiquetas reales dañadas por el OCR. Lo bloquea un veto explícito de `HORA` en la ventana de la
+   etiqueta. Con tolerancia 4 tampoco entraría, pero el veto está igual porque el margen es chico.
+
+Y una tercera que casi se cuela: al acortar el token a `{1,2}` se perdía el `%` de `3% días` (que es
+30 mal leído). Ese `%` es lo que activa la marca **`dudoso`**, y sin ella el caso pasaba de "no
+genera discrepancia" a "discrepancia en firme" contra el LH — un falso positivo nuevo. El token
+volvió a admitir `[.,%]`.
+
+**Medición final** — 91 páginas de liquidación reales (letras A, C, M, S):
+
+| | antes | después |
+|---|---|---|
+| días leídos | 66 (72.5%) | **90 (98.9%)** |
+| perdidas respecto de la versión vieja | — | **0** |
+
+Exactitud contra los días del LH: **62 coinciden**, 1 marcado `dudoso` correctamente (`3%` → 30), y
+1 sola discrepancia en firme — San Martin Vega, el caso ya documentado más arriba donde el papel
+dice 29 y el OCR lee 22 (se escala a IA y la IA trae un tercer valor, así que queda "revisar a
+mano", que es lo correcto).
+
+Validado además contra el JS real en el navegador con 15 casos (los 5 patrones rescatados, las 2
+trampas y 3 etiquetas vecinas que NO deben leerse): **15/15 idéntico a la validación en Python**.
+
+## 23-08-2026 — "—" mudo en la tabla de documentos adjuntos
+
+El usuario mostró la tabla de adjuntos donde 11 de 14 filas tenían `—` en ESTADO en vez de decir que
+el documento no estaba. Causa: `estado:(r&&r.estado)||(files.length?'—':'No adjuntado')`. Varios
+validadores escriben un resultado con `estado:'—'` (o `'⚪ No cargado'`) al salir temprano **sin
+archivos** — ese `'—'` ganaba sobre el fallback. Ahora el estado del módulo solo se usa si
+`files.length>0`; si no, siempre `'No adjuntado'`. Mismo criterio aplicado a la hoja Resumen del
+Excel, que iteraba `va_docResults` y mostraba `d.estado||'—'`.

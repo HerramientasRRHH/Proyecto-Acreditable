@@ -10790,11 +10790,18 @@ const VA_BASES={
       {id:'anexos',label:'H · Anexos Reemplazos',icon:'🔁',accept:'.pdf',multi:false,tip:'Anexos de reemplazo escaneados'},
       {id:'contratos',label:'H · Contratos',icon:'📝',accept:'.pdf',multi:true,tip:'Incluye Anexo cargo, Pacto HHEE'},
       {id:'liq',label:'H · Liquidaciones',icon:'📄',accept:'.pdf',multi:true,tip:'PDF unificado o varios'},
-      {id:'cartanofirma',label:'Carta No Firma',icon:'✉',accept:'.pdf',multi:false,tip:'Justifica liquidaciones sin firma'},
+      // Antofagasta NO lleva casilla propia para tres documentos que sí tienen
+      // otras bases (pedido explícito del usuario, 23-08-2026):
+      //  · Carta No Firma → viene DENTRO del PDF de Liquidaciones y ya se
+      //    detecta inline (liq.tieneCartaNoFirmaLiq). Confirmado en el archivo
+      //    real: "A. Liquidaciones letra A.pdf" trae esas cartas intercaladas
+      //    en las páginas 11, 21 y 26.
+      //  · Carta Fe de Erratas → va junto con el Libro, no como documento aparte.
+      //  · Acreditación Mujeres → la dotación femenina ya sale del Libro de
+      //    Haberes (columna sexo, ver va_resumenLH) y de la hoja MUJERES del
+      //    IMPUT; pedir un PDF aparte era duplicar lo mismo.
       {id:'librorem',label:'I · Libro Remuneraciones',icon:'📘',accept:'.pdf',multi:false,tip:'PDF tabular de remuneraciones'},
       {id:'libroasist',label:'J · Libro Asistencia',icon:'📅',accept:'.pdf',multi:true,tip:'PDF(s) escaneado(s) — uno por letra o el unificado — requiere OCR'},
-      {id:'libroasist_carta',label:'J · Carta Fe de Erratas',icon:'📝',accept:'.pdf,.docx',multi:false,tip:'Opcional — explica correcciones/anotaciones del Libro (RUT + motivo)'},
-      {id:'mujeres',label:'K · Acreditación Mujeres',icon:'👩',accept:'.pdf,.xlsx,.xls',multi:false,tip:'Listado/nómina de mujeres'},
       {id:'discapacidad',label:'K · Personal Discapacitado',icon:'♿',accept:'.pdf',multi:false,tip:'Listado + certificados'},
       {id:'licencias',label:'M · Licencias Médicas',icon:'🏥',accept:'.pdf,.oxps',multi:true,tip:'Listado + licencias'}]},
   'Mejillones':{sectores:{'Base única':'Barrido Mejillones 2025-2028'},
@@ -11569,24 +11576,53 @@ function va_extraerMontoLiquidoLiq(txt){
   if(alc!==null)return{monto:alc,fuente:'Alcance líquido'};
   return null;
 }
-// Días trabajados de la liquidación. El valor va SEGUIDO de la palabra "días",
-// que el OCR también corrompe ("30 dí2s", "22 Jias"), y los dígitos mismos
-// pueden salir mal ("O días" por 0, "3% días" por 30) — esos casos se marcan
-// `dudoso` para que el cruce contra el LH no los tome como discrepancia real.
+// Días trabajados de la liquidación. Los dígitos mismos pueden salir mal
+// ("O días" por 0, "3% días" por 30) — esos casos se marcan `dudoso` para que
+// el cruce contra el LH no los tome como discrepancia real.
+//
+// v2 — se ancla en la ETIQUETA, no en la palabra "días" que sigue al número.
+// La versión anterior exigía que después del número apareciera "días" (con sus
+// variantes de OCR) y eso dejaba sin leer 1 de cada 4 liquidaciones reales de
+// Antofagasta. Medido sobre 91 páginas de liquidación reales (letras A, C, M,
+// S, OCR a escala 3.0, la misma que usa va_validarLiquidaciones inline): la
+// versión anterior leía 66 (72.5%), ésta lee 90 (98.9%), sin perder ninguna de
+// las que ya leía. Casos reales que se recuperan:
+//   · "Días Trabajados: 30'días"   — apóstrofe pegado, \s* no lo cubría
+//   · "Días Trabajados: 30 dízs"   — "dízs" no estaba en las variantes
+//   · "Días Trabajados: 30 díaz"   — termina en z
+//   · "Bías Trabajados: 30 sas"    — ni la etiqueta ni "días" son legibles,
+//                                     pero "Trabajados: 30" sí
+//   · "Días Tralaiados: 30 días"   — etiqueta a distancia 6 del objetivo, que
+//                                     la tolerancia anterior (5) rechazaba
+//
+// Dos trampas reales que obligan a los candados de abajo, ambas encontradas
+// midiendo contra el OCR real (sin ellas, el extractor "mejorado" devolvía 0
+// en 12 páginas que la versión vieja leía bien):
+//   1. La "O" de "TrabajadOs" se tomaba como un cero, porque O es una lectura
+//      válida de 0. Lo bloquea el lookbehind de letra.
+//   2. "Horas no Trabajadas: 0 horas" queda a distancia 5 de DIASTRABAJADOS —
+//      más cerca que varias etiquetas reales. Lo bloquea el veto de HORA.
 function va_extraerDiasTrabajadosLiq(txt){
+  const OBJ='DIASTRABAJADOS';
   for(const ln of String(txt||'').split('\n')){
-    const re=/([0-9OoIl][0-9OoIl.,%]*)\s*(?:d[ií]as|d[ií]2s|dias|[dj]ias|[dj]i[a2]s)/gi;
+    // El token no puede arrancar pegado a una letra (candado 1).
+    const re=/(?<![A-Za-z\d.,])([0-9OoIl][0-9OoIl.,%]{0,3})/g;
     let m;
     while((m=re.exec(ln))!==null){
-      let etq=va_soloLetrasMayus(ln.slice(0,m.index));
-      if(!etq)continue;
-      if(etq.length>18)etq=etq.slice(-18);
-      if(va_distanciaLevenshtein(etq,'DIASTRABAJADOS')>5&&etq.indexOf('TRABAJAD')<0)continue;
       const raw=m[1].trim().replace(/[.,]+$/,'');
+      if(!raw)continue;
+      // Un token sin NINGÚN dígito real ("O" por 0, "I" por 1) solo vale si no
+      // es parte de una palabra — si no, la O inicial de "OPERARIO" se leería
+      // como un cero.
+      if(!/[0-9]/.test(raw)&&/[A-Za-z]/.test(ln.charAt(m.index+m[1].length)))continue;
+      const pre=va_soloLetrasMayus(ln.slice(0,m.index));
+      if(!pre)continue;
+      if(pre.slice(-22).indexOf('HORA')>=0)continue;              // candado 2
+      if(va_distanciaLevenshtein(pre.slice(-OBJ.length),OBJ)>4)continue;
       const dudoso=/[OoIl%]/.test(raw);
       const v=parseFloat(raw.replace(/[Oo]/g,'0').replace(/[Il]/g,'1').replace(/%/g,'').replace(/,/g,'.').replace(/\.$/,''));
       if(!isFinite(v))continue;
-      if(v<0||v>31)return null;   // "33 días" — imposible, es OCR malo
+      if(v<0||v>31)continue;   // "33 días" — imposible, es OCR malo: seguir buscando
       return{dias:v,dudoso:dudoso,leido:raw};
     }
   }
@@ -14952,6 +14988,138 @@ async function va_getPdfTextOCR(buf,maxPagesOCR,intentarRotacion,psm,onProgress)
 }
 
 // ── IMPUT Nómina: Excel maestro cruzado contra LH ──
+// ── Coherencia interna del IMPUT ──
+// El IMPUT es un Excel de tablas dinámicas donde la hoja "Libro Haberes"
+// GOBIERNA y todas las demás son vistas derivadas de ella. Dos cosas pueden
+// salir mal y ninguna se veía antes:
+//   1. Que el IMPUT esté DESACTUALIZADO: su hoja "Libro Haberes" no coincide
+//      con el Libro de Haberes que se subió a la validación.
+//   2. Que las tablas dinámicas estén SIN REFRESCAR: la hoja "Libro Haberes"
+//      está bien, pero MUJERES / JUBILADOS / FINIQUITADOS / etc. siguen
+//      mostrando el recorte de una versión anterior.
+//
+// Calibrado contra el IMPUT real de julio 2026 (341 trabajadores, 11 hojas).
+// Hallazgo que evita falsos positivos: las hojas derivadas NO están filtradas
+// por sub-área — cubren el Libro Haberes completo, incluidas las 3 personas de
+// "Base Antofagasta AK". Comparar contra va_lhFiltered (que sí filtra por
+// sub-área) marcaba 5 de 7 hojas como incoherentes sin que lo estuvieran.
+// Por eso el conjunto que gobierna es la hoja "Libro Haberes" ENTERA.
+function va_imputHeaderIdx(rows){
+  for(let i=0;i<Math.min(12,rows.length);i++){
+    const r=rows[i];if(!r)continue;
+    if(r.some(v=>/^\s*Nombre\s+Completo\s*$/i.test(String(v||''))))return i;
+  }
+  return -1;
+}
+function va_imputCols(hdr){
+  const idx={};
+  const busca=(clave,re)=>{const c=hdr.findIndex(v=>re.test(String(v||'')));if(c>=0)idx[clave]=c;};
+  busca('rut',/^\s*(N[úu]mero de Documento|RUT)\s*$/i);
+  busca('nom',/^\s*Nombre\s+Completo\s*$/i);
+  busca('ing',/Fecha\s+Ingreso/i);
+  busca('term',/Fecha\s+T[ée]rmino\s+Trabajo/i);
+  busca('sexo',/^\s*Sexo\s*$/i);
+  busca('sub',/Nombre\s+Sub-[áa]rea\s+Asignada/i);
+  busca('disc',/Situaci[óo]n\s+de\s+Discapacidad/i);
+  busca('fondo',/Fondo\s+de\s+Cotizaci[óo]n/i);
+  busca('lic',/D[íi]as\s+Licencias/i);
+  return idx;
+}
+// Todos los RUT válidos de una hoja, sin importar en qué columna estén (las
+// tablas dinámicas mueven las columnas según cómo se armó el pivote).
+function va_imputRutsHoja(wb,nombre){
+  const set=new Set();
+  const rows=XLSX.utils.sheet_to_json(wb.Sheets[nombre],{header:1,defval:null});
+  rows.forEach(r=>{if(r)r.forEach(v=>{
+    if(v==null)return;
+    va_findAllRuts(String(v)).forEach(x=>set.add(x));
+  });});
+  return set;
+}
+function va_imputCoherencia(wb,normR){
+  const shLH=wb.SheetNames.find(s=>/^\s*Libro\s*Haberes\s*$/i.test(s));
+  if(!shLH)return{disponible:false,motivo:'El IMPUT no trae una hoja "Libro Haberes" — sin ella no hay contra qué comparar las tablas dinámicas.'};
+  const rows=XLSX.utils.sheet_to_json(wb.Sheets[shLH],{header:1,defval:null});
+  const hi=va_imputHeaderIdx(rows);
+  if(hi<0)return{disponible:false,motivo:'No se encontró la fila de encabezados ("Nombre Completo") en la hoja Libro Haberes.'};
+  const C=va_imputCols(rows[hi]);
+  if(C.rut==null)return{disponible:false,motivo:'La hoja Libro Haberes no tiene columna de RUT ("Número de Documento").'};
+  // Metadatos que el propio libro imprime arriba de los encabezados
+  const meta={};
+  for(let i=0;i<hi;i++){
+    const linea=(rows[i]||[]).map(v=>String(v||'')).join(' ');
+    let m;
+    if((m=linea.match(/Fecha\s+Generaci[óo]n:\s*(.+)$/i)))meta.generacion=m[1].trim();
+    if((m=linea.match(/Fecha\s+Desde:\s*([\d/.-]+)/i)))meta.desde=m[1].trim();
+    if((m=linea.match(/Fecha\s+Hasta:\s*([\d/.-]+)/i)))meta.hasta=m[1].trim();
+  }
+  const mes=(d)=>{const f=(d instanceof Date)?d:(typeof d==='string'&&/\d{4}-\d{2}-\d{2}/.test(d)?new Date(d):null);
+    return f&&!isNaN(f.getTime())?{m:f.getMonth()+1,a:f.getFullYear()}:null;};
+  const enPeriodo=(d)=>{const p=mes(d);return !!(p&&va_periodoMes&&va_periodoAnio&&p.m===Number(va_periodoMes)&&p.a===Number(va_periodoAnio));};
+  const gob=new Map();
+  for(let i=hi+1;i<rows.length;i++){
+    const r=rows[i];if(!r||r[C.rut]==null)continue;
+    const rn=normR(r[C.rut]);
+    if(rn.length<9)continue;
+    const val=new Set();va_findAllRuts(String(r[C.rut])).forEach(x=>val.add(x));
+    if(!val.has(rn))continue;   // descarta encabezados repetidos y RUT corporativos
+    gob.set(rn,{
+      nombre:C.nom!=null?String(r[C.nom]||''):'',
+      sub:C.sub!=null?String(r[C.sub]||''):'',
+      sexo:C.sexo!=null?String(r[C.sexo]||'').trim().toUpperCase().slice(0,1):'',
+      disc:C.disc!=null?String(r[C.disc]||'').trim().toUpperCase():'',
+      fondo:C.fondo!=null?String(r[C.fondo]||'').trim().toUpperCase():'',
+      term:C.term!=null?r[C.term]:null,
+      ing:C.ing!=null?r[C.ing]:null,
+      lic:C.lic!=null?(parseFloat(r[C.lic])||0):0
+    });
+  }
+  // Cada hoja derivada y qué subconjunto del Libro Haberes debería ser.
+  const DEF=[
+    {etq:'MATRIZ',          re:/^\s*MATRIZ\s*$/i,          pred:()=>true,                          desc:'todos los trabajadores del Libro'},
+    {etq:'MUJERES',         re:/^\s*MUJERES\s*$/i,         pred:x=>x.sexo==='F',                   desc:'los de sexo Femenino'},
+    {etq:'DISCAPACIDAD',    re:/DISCAPACID/i,              pred:x=>x.disc&&x.disc!=='NO',          desc:'los marcados en situación de discapacidad'},
+    {etq:'JUBILADOS',       re:/^\s*JUBILADOS\s*$/i,       pred:x=>x.fondo.indexOf('JUBILAD')>=0,  desc:'los con Fondo de Cotización = Jubilado'},
+    {etq:'FINIQUITADOS',    re:/^\s*FINIQUITADOS\s*$/i,    pred:x=>enPeriodo(x.term),              desc:'los con Fecha Término dentro del período'},
+    {etq:'CONTRATOS',       re:/^\s*CONTRATOS\s*$/i,       pred:x=>enPeriodo(x.ing),               desc:'los que ingresaron dentro del período'},
+    {etq:'LICENCIA MEDICA', re:/LICENCIA\s*M[EÉ]DICA/i,    pred:x=>x.lic>0,                        desc:'los con días de licencia en el período'}
+  ];
+  const hojas=DEF.map(d=>{
+    // Los nombres reales vienen con espacios de más (" CONTRATOS", "FINIQUITADOS ")
+    const nombre=wb.SheetNames.find(s=>d.re.test(String(s||'').trim()));
+    if(!nombre)return{etq:d.etq,desc:d.desc,encontrada:false};
+    const tiene=va_imputRutsHoja(wb,nombre);
+    const esperado=new Set([...gob.keys()].filter(k=>d.pred(gob.get(k))));
+    const sobran=[...tiene].filter(r=>!esperado.has(r));
+    const faltan=[...esperado].filter(r=>!tiene.has(r));
+    const nom=r=>(gob.get(r)&&gob.get(r).nombre)||'(no está en la hoja Libro Haberes)';
+    return{etq:d.etq,desc:d.desc,encontrada:true,hoja:nombre,
+      tiene:tiene.size,esperado:esperado.size,
+      sobran:sobran.map(r=>({rut:r,nombre:nom(r)})),
+      faltan:faltan.map(r=>({rut:r,nombre:nom(r)})),
+      ok:sobran.length===0&&faltan.length===0};
+  });
+  // ¿Está actualizado? Contra el LH COMPLETO (va_lhAll), no el filtrado por
+  // sub-área: las hojas del IMPUT tampoco filtran.
+  const lhTodos=new Map((va_lhAll||[]).map(x=>[x.rutNorm,x.nombre]));
+  const faltanEnImput=[...lhTodos.keys()].filter(r=>!gob.has(r)).map(r=>({rut:r,nombre:lhTodos.get(r)}));
+  const sobranEnImput=[...gob.keys()].filter(r=>!lhTodos.has(r)).map(r=>({rut:r,nombre:gob.get(r).nombre}));
+  const periodoOk=!meta.desde||!va_periodoMes||enPeriodo(va_imputFechaCL(meta.desde));
+  return{disponible:true,meta:meta,periodoOk:periodoOk,
+    gobTotal:gob.size,lhTotal:lhTodos.size,
+    faltanEnImput:faltanEnImput,sobranEnImput:sobranEnImput,
+    actualizado:faltanEnImput.length===0&&sobranEnImput.length===0,
+    hojas:hojas,
+    hojasIncoherentes:hojas.filter(h=>h.encontrada&&!h.ok).length,
+    hojasNoEncontradas:hojas.filter(h=>!h.encontrada).map(h=>h.etq)};
+}
+// "01/07/2026" -> Date. El IMPUT escribe las fechas de cabecera en formato
+// chileno (día/mes/año), que new Date() interpreta al revés.
+function va_imputFechaCL(s){
+  const m=String(s||'').match(/(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/);
+  if(!m)return null;
+  return new Date(Number(m[3]),Number(m[2])-1,Number(m[1]));
+}
 async function va_validarImput(){
   var dd=va_docsData['imput'];
   if(!dd||!dd.buffers||!dd.buffers.length){va_docResults['imput']={nombre:'IMPUT Nómina',cargado:false,estado:'—'};return;}
@@ -15099,7 +15267,12 @@ async function va_validarImput(){
     result.licencias={hoja:shLic,imputTotal:licRuts.size,lhTotal:licLHRuts.size,coinciden:coinc2.length};
   }
 
-  result.estado=result.matriz&&parseFloat(result.matriz.pct)>=95?'✅':'⚠';
+  // Coherencia interna del IMPUT (Libro Haberes gobierna las dinámicas)
+  try{result.coherencia=va_imputCoherencia(wb,normR);}
+  catch(e){result.coherencia={disponible:false,motivo:'No se pudo analizar la coherencia: '+e.message};}
+  const coh=result.coherencia;
+  const cohMal=coh&&coh.disponible&&(!coh.actualizado||coh.hojasIncoherentes>0);
+  result.estado=cohMal?'❌':(result.matriz&&parseFloat(result.matriz.pct)>=95?'✅':'⚠');
   va_docResults['imput']=result;
 }
 
@@ -16080,21 +16253,12 @@ async function va_validarLibroAsist(){
     estado:faltantes.length===0?'✅':(faltantes.length<=Math.round(esperados*0.1)?'⚠':'❌'),
     nota:`${totalPags} páginas · ${identificados.size}/${esperados} trabajadores identificados (${viaOCR} por OCR, ${viaIA} por IA, ${sinIdentificar} páginas sin identificar)`};
 
-  // ── Carta Fe de Erratas: explica anotaciones/correcciones manuscritas del Libro ──
-  // Real (Antofagasta): tabla N° / NOMBRE / RUT / Caso ("Por error firme el día
-  // X en la tarde", etc.) — se apoya en el detalle para que quien revisa pueda
-  // cruzar cada anotación del Libro físico contra su explicación en la carta.
-  const ddCarta=va_docsData['libroasist_carta'];
-  const carta={cargada:false,filas:[],rutsEnCarta:new Set()};
-  if(ddCarta&&ddCarta.buffers&&ddCarta.buffers.length){
-    carta.cargada=true;
-    const buf=ddCarta.buffers[0];
-    const esDocx=ddCarta.files[0]&&/\.docx$/i.test(ddCarta.files[0].name);
-    const txtCarta=esDocx?await va_readDocxText(buf):await va_getPdfTextOCR(buf,40,true);
-    carta.filas=va_parseCartaFeErratas(txtCarta);
-    carta.filas.forEach(f=>carta.rutsEnCarta.add(f.rut));
-  }
-  va_docResults['libroasist'].carta=carta;
+  // La Carta Fe de Erratas dejó de ser un documento propio de Antofagasta
+  // (pedido explícito del usuario, 23-08-2026): va junto con el Libro y ya no
+  // se pide ni se valida por separado en esta base. El parser
+  // va_parseCartaFeErratas y el render asociado se mantienen porque los usan
+  // otras bases con su propio slot 'libroasist_carta' (Vitacura).
+  va_docResults['libroasist'].carta={cargada:false,filas:[],rutsEnCarta:new Set()};
 }
 // Parsea la tabla de la carta Fe de Erratas: una fila por trabajador con RUT
 // y la descripción de su corrección/anotación.
@@ -16958,10 +17122,13 @@ async function va_ejecutar(){
       setPg(81,'Validando IMPUT Nómina...');await va_validarImput();
       setPg(81,'Validando Listado Jubilados...');await va_validarJubilados();
       setPg(84,'Validando Anexos Reemplazos...');await va_validarAnexosReemplazo();
-      setPg(84,'Validando Carta No Firma...');await va_validarCartaNoFirma();
+      // Carta No Firma y Acreditación Mujeres ya no son documentos propios de
+      // esta base (ver el comentario en VA_BASES.Antofagasta.docs): la carta se
+      // detecta dentro de las Liquidaciones y la dotación femenina sale del
+      // Libro de Haberes. Llamar a sus validadores acá solo dejaba un resultado
+      // "no adjuntado" fantasma en el Resumen por un documento que ya no se pide.
       setPg(85,'Validando Libro Remuneraciones...');await va_validarLibroRem();
       setPg(85,'Validando Libro Asistencia (el más grande — puede tardar)...');await va_validarLibroAsist();
-      setPg(92,'Validando Acreditación Mujeres...');await va_validarMujeres();
       setPg(93,'Validando Personal Discapacitado...');await va_validarDiscapacidad();
       setPg(93,'Validando Contratos (firma nuevos ingresos)...');await va_validarContratosAntofagasta();
     }
@@ -17059,7 +17226,7 @@ function va_renderResultados(){
   baseTabs.push('f30','f301','previred');
   const basesConLicEnLiqTabs=['Lo Barnechea','Las Condes','Mejillones'];
   if(basesConLicEnLiqTabs.includes(va_baseKey)){baseTabs.push('libro');}
-  if(va_baseKey==='Antofagasta'){baseTabs.push('imput','jubilados','anexos','cartanofirma','librorem','libroasist','mujeres','discapacidad','contratos');}
+  if(va_baseKey==='Antofagasta'){baseTabs.push('imput','jubilados','anexos','librorem','libroasist','discapacidad','contratos');}
   if(va_baseKey==='Vitacura'){baseTabs.push('contratos','nominas','epp','libroasist','subcontrato');}
   const tabs=baseTabs;
   const tabLabels={liq:'📄 Liquidaciones',finiq:'📑 Finiquitos',licencias:'🏥 Lic. Médicas',exencion:'👴 Exenciones',f30:'📋 F30',f301:'📋 F30-1',previred:'💰 PreviRed',
@@ -17089,7 +17256,7 @@ function va_subtab(tab){
   else if(tab==='libroasist') c.innerHTML=va_renderAntTab(tab);
   else if(tab==='jubilados'&&va_baseKey!=='Vitacura') c.innerHTML=va_renderJubilados();
   else if(tab==='discapacidad'&&va_baseKey!=='Vitacura') c.innerHTML=va_renderDiscapacidad();
-  else if(['librorem','mujeres'].includes(tab)&&va_baseKey!=='Vitacura') c.innerHTML=va_renderAntTab(tab);
+  else if(tab==='librorem'&&va_baseKey!=='Vitacura') c.innerHTML=va_renderAntTab(tab);
   else if(tab==='anexos') c.innerHTML=va_renderAnexos();
   else if(tab==='cartanofirma') c.innerHTML=va_renderCartaNoFirma();
   else if(tab==='nominas') c.innerHTML=va_renderNominas();
@@ -17664,11 +17831,72 @@ function va_renderCruceTab(docId){
 // RENDER FUNCTIONS — NUEVOS TABS ANTOFAGASTA
 // ═══════════════════════════════════════════════════════════
 
+// Panel de coherencia del IMPUT: primero el veredicto de si está actualizado y
+// si las dinámicas están refrescadas, y recién después el detalle de qué sobra
+// o falta en cada hoja — que es lo accionable para quien tiene que arreglarlo.
+function va_renderImputCoherencia(c){
+  if(!c)return '';
+  if(!c.disponible)return '<div style="background:#fffbea;border:1px solid #f0d060;border-radius:8px;padding:10px 14px;font-size:.8rem;color:#a07900;margin-bottom:12px">⚠ No se pudo verificar la coherencia — '+c.motivo+'</div>';
+  var h='<div style="font-weight:700;font-size:.85rem;color:var(--v);margin:4px 0 8px">🧮 Coherencia del IMPUT — el <em>Libro Haberes</em> gobierna las tablas dinámicas</div>';
+  var meta=[];
+  if(c.meta.generacion)meta.push('generado el '+c.meta.generacion);
+  if(c.meta.desde)meta.push('período '+c.meta.desde+(c.meta.hasta?' a '+c.meta.hasta:''));
+  if(meta.length)h+='<div style="font-size:.76rem;color:#888;margin-bottom:8px">'+meta.join(' · ')+'</div>';
+  if(!c.periodoOk)h+='<div style="background:#fdecea;border-radius:7px;padding:8px 14px;font-size:.78rem;color:#c0392b;margin-bottom:8px">⚠ El período del IMPUT no coincide con el período auditado — puede ser un IMPUT de otro mes.</div>';
+
+  h+='<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px">'
+    +'<div class="ch-kpi"><div class="v">'+c.gobTotal+'</div><div class="l">En Libro Haberes</div></div>'
+    +'<div class="ch-kpi'+(c.actualizado?' ok':' err')+'"><div class="v">'+(c.actualizado?'✅':'❌')+'</div><div class="l">'+(c.actualizado?'Actualizado vs LH':'Desactualizado vs LH')+'</div></div>'
+    +'<div class="ch-kpi'+(c.hojasIncoherentes===0?' ok':' err')+'"><div class="v">'+c.hojasIncoherentes+'</div><div class="l">Hojas incoherentes</div></div>'
+    +'</div>';
+
+  if(!c.actualizado){
+    h+='<div style="background:#fdecea;border-radius:7px;padding:8px 14px;font-size:.78rem;color:#c0392b;margin-bottom:8px">❌ La hoja <strong>Libro Haberes</strong> del IMPUT no coincide con el Libro de Haberes cargado ('+c.gobTotal+' vs '+c.lhTotal+' trabajadores). Hay que regenerar el IMPUT desde el LH vigente.</div>';
+    var lista=function(t,arr){
+      if(!arr.length)return '';
+      var x='<div style="font-size:.76rem;color:#c0392b;margin:4px 0 2px"><strong>'+t+' ('+arr.length+')</strong></div>';
+      x+='<table class="ch-tbl"><thead><tr><th>RUT</th><th>Nombre</th></tr></thead><tbody>';
+      arr.slice(0,40).forEach(function(r){x+='<tr><td style="font-size:.7rem">'+r.rut+'</td><td style="font-size:.72rem">'+r.nombre+'</td></tr>';});
+      if(arr.length>40)x+='<tr><td colspan="2" style="font-size:.72rem;color:#888">… y '+(arr.length-40)+' más</td></tr>';
+      return x+'</tbody></table>';
+    };
+    h+=lista('Están en el Libro de Haberes pero NO en el IMPUT',c.faltanEnImput);
+    h+=lista('Están en el IMPUT pero YA NO en el Libro de Haberes',c.sobranEnImput);
+  }
+
+  h+='<table class="ch-tbl"><thead><tr><th></th><th>Hoja</th><th>Debería contener</th><th>Tiene</th><th>Esperado</th><th>Diferencia</th></tr></thead><tbody>';
+  c.hojas.forEach(function(s){
+    if(!s.encontrada){
+      h+='<tr><td>⚪</td><td>'+s.etq+'</td><td style="font-size:.72rem">'+s.desc+'</td><td colspan="3" style="font-size:.72rem;color:#888">hoja no encontrada en el archivo</td></tr>';
+      return;
+    }
+    var dif=s.ok?'—':((s.sobran.length?('sobran '+s.sobran.length):'')+(s.sobran.length&&s.faltan.length?' · ':'')+(s.faltan.length?('faltan '+s.faltan.length):''));
+    h+='<tr'+(s.ok?'':' style="background:#fdecea"')+'><td>'+(s.ok?'✅':'❌')+'</td><td style="font-size:.74rem">'+s.hoja+'</td>'
+      +'<td style="font-size:.72rem;color:#555">'+s.desc+'</td>'
+      +'<td style="text-align:center">'+s.tiene+'</td><td style="text-align:center">'+s.esperado+'</td>'
+      +'<td style="font-size:.72rem;color:'+(s.ok?'#16613a':'#c0392b')+'">'+dif+'</td></tr>';
+  });
+  h+='</tbody></table>';
+
+  var malas=c.hojas.filter(function(s){return s.encontrada&&!s.ok;});
+  if(malas.length){
+    h+='<div style="background:#fffbea;border:1px solid #f0d060;border-radius:8px;padding:8px 14px;font-size:.78rem;color:#a07900;margin:8px 0">Las tablas dinámicas quedaron sin refrescar respecto de la hoja <strong>Libro Haberes</strong>. En Excel: <em>Datos → Actualizar todo</em>, y volver a exportar.</div>';
+    malas.forEach(function(s){
+      h+='<details style="margin-bottom:6px"><summary style="cursor:pointer;font-size:.78rem;font-weight:600">'+s.hoja+' — '+(s.sobran.length+s.faltan.length)+' diferencia(s)</summary>';
+      h+='<table class="ch-tbl"><thead><tr><th>Situación</th><th>RUT</th><th>Nombre</th></tr></thead><tbody>';
+      s.sobran.slice(0,30).forEach(function(r){h+='<tr><td style="font-size:.72rem;color:#c0392b">sobra en la hoja</td><td style="font-size:.7rem">'+r.rut+'</td><td style="font-size:.72rem">'+r.nombre+'</td></tr>';});
+      s.faltan.slice(0,30).forEach(function(r){h+='<tr><td style="font-size:.72rem;color:#c0392b">falta en la hoja</td><td style="font-size:.7rem">'+r.rut+'</td><td style="font-size:.72rem">'+r.nombre+'</td></tr>';});
+      h+='</tbody></table></details>';
+    });
+  }
+  return h+'<div style="height:8px"></div>';
+}
 function va_renderImput(){
   var d=va_docResults['imput'];
   if(!d||!d.cargado) return '<div class="ch-empty"><div class="ico">📊</div>No se cargó el IMPUT</div>';
   if(d.error) return '<div style="color:#c0392b;padding:12px">❌ '+d.error+'</div>';
   var h='<div style="font-size:.78rem;color:#888;margin-bottom:10px">Hojas detectadas: <strong>'+d.hojas.join(', ')+'</strong></div>';
+  h+=va_renderImputCoherencia(d.coherencia);
 
   // MATRIZ
   if(d.matriz){
@@ -18192,7 +18420,10 @@ function va_exportExcel(){
     const detRes=(typeof d.detalle==='string'&&d.detalle)?d.detalle
       :(d.pct!=null?d.pct+'%'
       :(d.faltantes?d.faltantes.length+' faltantes':''));
-    res.push([d.nombre||id,d.estado||'—',detRes]);});
+    // Mismo criterio que va_adjuntos(): sin archivos cargados el estado del
+    // módulo no significa nada, y un '—' mudo esconde que el documento falta.
+    const cargadoRes=va_moduloCargado(id);
+    res.push([d.nombre||id,cargadoRes?(d.estado||'—'):'No adjuntado',cargadoRes?detRes:'']);});
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(res),'Resumen');
   // Hoja 2: Adjuntos — qué documentos se subieron REALMENTE en esta corrida.
   // Sin esto, un informe donde solo se cargó el IMPUT era indistinguible de
@@ -18393,6 +18624,39 @@ function va_exportExcel(){
     var di=va_docResults['imput'];
     if(di&&di.cargado&&di.matriz){
       var ir=[['IMPUT — Cruce MATRIZ vs LH'],['En IMPUT',di.matriz.imputTotal],['En LH',di.matriz.lhTotal],['Coinciden',di.matriz.coinciden],['%',di.matriz.pct],[]];
+      // Coherencia interna: si esto sale mal, el resto del cruce se explica
+      // solo (una dinámica sin refrescar produce diferencias que parecen
+      // documentación faltante y no lo son), así que va primero.
+      var co=di.coherencia;
+      if(co&&co.disponible){
+        ir.push(['COHERENCIA DEL IMPUT — la hoja "Libro Haberes" gobierna las tablas dinámicas']);
+        if(co.meta.generacion)ir.push(['Fecha de generación',co.meta.generacion]);
+        if(co.meta.desde)ir.push(['Período del IMPUT',co.meta.desde+(co.meta.hasta?(' a '+co.meta.hasta):'')]);
+        ir.push(['Período coincide con el auditado',co.periodoOk?'Sí':'NO']);
+        ir.push(['Trabajadores en hoja Libro Haberes',co.gobTotal]);
+        ir.push(['Trabajadores en el LH cargado',co.lhTotal]);
+        ir.push(['¿IMPUT actualizado vs LH?',co.actualizado?'Sí':'NO — hay que regenerarlo']);
+        ir.push(['Hojas incoherentes (dinámicas sin refrescar)',co.hojasIncoherentes]);
+        ir.push([],['Hoja','Debería contener','Tiene','Esperado','Sobran','Faltan','Estado']);
+        co.hojas.forEach(function(s){
+          if(!s.encontrada){ir.push([s.etq,s.desc,'—','—','—','—','hoja no encontrada']);return;}
+          ir.push([s.hoja,s.desc,s.tiene,s.esperado,s.sobran.length,s.faltan.length,s.ok?'OK':'INCOHERENTE']);
+        });
+        co.hojas.filter(function(s){return s.encontrada&&!s.ok;}).forEach(function(s){
+          ir.push([],['Diferencias de la hoja '+s.hoja],['Situación','RUT','Nombre']);
+          s.sobran.forEach(function(r){ir.push(['sobra en la hoja',r.rut,r.nombre]);});
+          s.faltan.forEach(function(r){ir.push(['falta en la hoja',r.rut,r.nombre]);});
+        });
+        if(!co.actualizado){
+          if(co.faltanEnImput.length){ir.push([],['EN EL LH PERO NO EN EL IMPUT'],['RUT','Nombre']);
+            co.faltanEnImput.forEach(function(r){ir.push([r.rut,r.nombre]);});}
+          if(co.sobranEnImput.length){ir.push([],['EN EL IMPUT PERO YA NO EN EL LH'],['RUT','Nombre']);
+            co.sobranEnImput.forEach(function(r){ir.push([r.rut,r.nombre]);});}
+        }
+        ir.push([]);
+      }else if(co){
+        ir.push(['COHERENCIA DEL IMPUT','No se pudo verificar: '+co.motivo],[]);
+      }
       if(di.matriz.soloLH.length){ir.push(['SOLO EN LH (no en IMPUT)','']);di.matriz.soloLH.forEach(function(f){ir.push([f.rut,f.nombre]);});}
       if(di.contratos){ir.push([],['CONTRATOS — Ingresos','']);ir.push(['RUT','Nombre','Fecha','Firma','En LH']);
         di.contratos.detalle.forEach(function(r){ir.push([r.rut,r.nombre,r.fecha||'',r.firma,r.enLH?'Sí':'No']);});}
@@ -18469,7 +18733,7 @@ function va_exportExcel(){
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(lar),'LibroAsist');
     }
     // Other Antofagasta docs
-    var antDocs=['jubilados','anexos','cartanofirma','librorem','mujeres','discapacidad'];
+    var antDocs=['jubilados','anexos','librorem','discapacidad'];
     var antNames={jubilados:'Jubilados',anexos:'Reemplazos',cartanofirma:'CartaNoFirma',librorem:'LibroRem',mujeres:'Mujeres',discapacidad:'Discapacidad'};
     for(var ai=0;ai<antDocs.length;ai++){
       var docId=antDocs[ai];var dd=va_docResults[docId];
@@ -18579,7 +18843,14 @@ function va_adjuntos(){
       nArchivos:files.length,
       archivos:files.map(function(f){return f.name;}),
       mb:bytes/1048576,
-      estado:(r&&r.estado)||(files.length?'—':'No adjuntado'),
+      // El estado del módulo solo significa algo si HAY archivos. Antes esto
+      // era `(r&&r.estado)||(...)`, y varios módulos dejan un resultado con
+      // estado '—' o '⚪ No cargado' aunque nadie haya subido nada (ej.
+      // va_validarImput escribe {cargado:false,estado:'—'} al salir). Ese '—'
+      // ganaba sobre el fallback y la tabla mostraba un guión mudo en vez de
+      // decir que el documento falta — que es justo lo que el usuario necesita
+      // ver de un vistazo. Sin archivos, el estado es siempre "No adjuntado".
+      estado:files.length?((r&&r.estado)||'—'):'No adjuntado',
       paginas:(r&&(r.totalPags||(r.diag&&r.diag.pagsTotal)))||null};
   });
 }
