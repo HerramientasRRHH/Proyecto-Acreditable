@@ -350,3 +350,94 @@ no arranca en el navegador sandbox (`Tesseract.createWorker` falla, ya
 documentado en la entrada del Libro de Asistencia). Pendiente que el usuario
 corra Antofagasta con key de IA y confirme cuántos de los "no encontrado"
 actuales pasan a identificarse.
+
+---
+
+## 24-08-2026 — Módulo RENOMBRADOR (BUK / DOCUMENTOS): anexos escaneados de Akro
+
+Primera auditoría del **Renombrador** (no del Validador). Documentos reales:
+`Proyecto Renombrador\Anexos {ESPECIALISTAS,JARDINERIA,LA FAENA,LO HERMIDA,PN}.pdf`
+— 118 páginas en total, **0% texto nativo** (todo depende del OCR), más
+`Firma Documentos..xlsx` (4697 trabajadores) como nómina.
+
+**Verdad de terreno**: el ZIP que había descargado el usuario
+(`Documentos_22-08-2026.zip`) traía **3 archivos para 118 páginas**, llamados
+`Firman Rut de Conformidad - AnexoCargo.pdf`,
+`Abajrdor Rut Firman Ana - AnexoCargo.pdf` y
+`Dor Ut Conformidad Firman - AnexoCargo.pdf`. Eso son cuatro bugs
+independientes apilados, no uno.
+
+**Estructura real** (verificada renderizando páginas a PNG y mirándolas):
+cada página es un anexo COMPLETO de un trabajador distinto. El título va
+impreso con espaciado entre letras — `A N E X O  D E  C O N T R A T O  D E
+T R A B A J O` — y el nombre aparece como
+`o Empresa y Don (ña) NOMBRE1 NOMBRE2 APELLIDO1 APELLIDO2, de nacionalidad`.
+
+### Bug 1 — `cargarExcel` descartaba la nómina ENTERA (el más grave)
+`iFT` (Fecha Término) tenía fallback posicional `if(iFT<0)iFT=5`. La planilla
+`Firma Documentos.xlsx` no trae esa columna, así que iFT caía sobre
+`Fecha Creación`, que **siempre** tiene valor → toda fila se leía como
+desvinculada → `ren_trabajadores` quedaba **vacío**. Medido: **0 trabajadores
+antes, 4697 después**. Lección general: *un filtro EXCLUYENTE nunca lleva
+fallback posicional* — si apunta mal, borra todo en silencio.
+Además, `if(!cod)continue` borraba de la nómina a quien no tuviera código de
+ficha; ahora se carga igual y BUK reporta `SIN_CODIGO_FICHA` (antes mentía
+con `RUT_NO_EN_EXCEL` sobre alguien que sí estaba).
+
+### Bug 2 — el agrupador fallaba por EXCESO (regla 3 de politica-ia.md)
+`esCont` pegaba páginas mientras el RUT no lo contradijera. Con OCR basta una
+página con el RUT ilegible para que se pegue a la anterior: así 118 páginas
+terminaron en 3 archivos. El gate estaba en la dirección equivocada.
+Fix: `esInicioFuerteDoc()` — si la página trae el TÍTULO de un documento en
+su encabezado, es documento nuevo, punto. Reproducido en consola con 8
+páginas y 3 RUTs ilegibles: **antes 5 grupos, ahora 8**.
+
+### Bug 3 — el título espaciado era invisible para `detectarInicio`
+`enc2.includes('anexo de contrato de trabajo')` no matchea nunca contra
+`A N E X O  D E  C O N T R A T O ...`. Fix: `normCompacto()` (normaliza y
+quita TODOS los espacios) y comparación contra `TITULOS_DOC_COMPACTOS`.
+Vale para cualquier documento con letter-spacing, no solo estos anexos.
+
+### Bug 4 — el regex E2 no contemplaba el paréntesis de APERTURA
+`/(?:don|do[nñ]a)\s*\)?\s*/` aceptaba el `)` pero no el `(`, así que
+`Don (ña) Rosa Alejandra Arce Vergara` **no matcheaba ni con OCR perfecto**.
+El nombre caía al escalón E6 (ventana de texto antes del RUT), que en estos
+anexos aterriza sobre la zona de firma → de ahí los "Firman Rut de
+Conformidad". Fix: bloque de género como grupo opcional COMPLETO
+`(?:\(\s*[a-zñA-ZÑ]{0,3}\s*\)\s*)?` — con los dos paréntesis, para no comerse
+la primera letra de un nombre real (sin eso, `Don Hector` perdía la H).
+Se amplió `EXCLUIR` con el vocabulario de la zona de firma y del cuerpo del
+anexo, que es lo que E6 estaba convirtiendo en nombres.
+Validado: **8/8** casos (4 reales + variantes `Doña`, `Don(ña)`, `Don (fia)`
+del OCR, y `Don` sin paréntesis), y el representante de la empresa
+(Ricardo Letelier Querci) sigue devolviendo `null`.
+
+### Mejora — RUT por módulo 11 y reparación de lecturas rotas
+`rutValido()` / `ren_repararRut()` / `ren_elegirRut()`. Gratis y sin IA.
+Sobre la nómina real: **los 4697 RUTs validan módulo 11**, así que el DV es
+un filtro fiable. `ren_repararRut` cambia UN dígito por sus confusiones
+típicas de Tesseract y sólo acepta la variante si es **única** en la nómina.
+Riesgo medido: solo **46 de 4697 (0,98%)** tienen un vecino a un dígito, y
+**ninguno** de esos es ambiguo.
+
+### Mejora — normalizar el nombre leído contra la nómina
+Cuando el nombre sale del PDF y hay Excel cargado, se pasa por
+`va_matchNombreNomina` (el matcher por tokens que ya existía) para escribirlo
+con la grafía OFICIAL. Validado contra los 4697: los 4 nombres reales
+matchean, y con una letra cambiada (`Alejadra`, `Haydeo`, `Narcisa`) se
+corrigen solos al nombre correcto.
+
+### Rendimiento — el OCR corría 5 pasadas por página
+`extraerTextoPagina` probaba SIEMPRE las 4 rotaciones (OCR sobre la franja
+superior) más el OCR definitivo = 5 pasadas, incluso con la página derecha,
+que es el caso normal. Medido en el navegador a scale 3.0 con el paquete
+`best`: **más de 2 minutos por página**, o sea el lote de 118 no terminaba
+nunca. Ahora: una pasada en la orientación original y, sólo si
+`ren_lecturaPobre()`, se prueban las otras tres — la cobertura 360° se
+conserva. Se agregó `ren_preprocesarCanvas()` (gris + rampa de contraste, sin
+binarizar duro para no romper las letras finas).
+
+**Pendiente**: falta la corrida end-to-end del usuario con los 5 PDFs reales
+para contar cuántos de los 118 salen con nombre correcto. Todo lo de arriba
+está validado por partes (consola + Python contra la nómina real), no de
+punta a punta — Tesseract.js no termina en el navegador sandbox.

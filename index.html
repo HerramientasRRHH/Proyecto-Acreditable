@@ -2035,6 +2035,69 @@ const TIPOS_TEXTO_COMPLETO=['ReglamentoInterno','LeyKarin','PactoIntegridad','MP
 const norm=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
 const limpRut=r=>String(r||'').replace(/[.,\-\s]/g,'').toLowerCase().trim();
 const esEmpresa=r=>{if(RUTS_EMPRESA.has(r))return true;for(const e of RUTS_EMPRESA){if(e.length>=6&&r.startsWith(e.slice(0,6)))return true;}return false;};
+// Igual que norm() pero SIN espacios. Los titulos de estos documentos vienen
+// impresos con espaciado entre letras ("A N E X O  D E  C O N T R A T O  D E
+// T R A B A J O"), asi que ningun includes('anexo de contrato de trabajo')
+// sobre el texto normalizado matchea nunca. Comparando contra el texto
+// compactado si.
+const normCompacto=s=>norm(s).replace(/\s+/g,'');
+
+// ══════════════════════════════════════════
+// VALIDACIÓN DE RUT (módulo 11)
+// ══════════════════════════════════════════
+// Gratis, determinista y sin IA: la enorme mayoría de las lecturas corruptas
+// de OCR falla el dígito verificador. Sirve para dos cosas distintas:
+//   1. descartar candidatos basura antes de que lleguen al nombre del archivo;
+//   2. REPARAR una lectura rota probando las confusiones típicas del OCR.
+function rutDV(cuerpo){
+  let suma=0,mul=2;
+  for(let i=cuerpo.length-1;i>=0;i--){
+    suma+=parseInt(cuerpo[i],10)*mul;
+    mul=mul===7?2:mul+1;
+  }
+  const r=11-(suma%11);
+  return r===11?'0':r===10?'k':String(r);
+}
+function rutValido(r){
+  const s=limpRut(r);
+  if(!/^[0-9]{7,8}[0-9k]$/.test(s))return false;
+  return rutDV(s.slice(0,-1))===s.slice(-1);
+}
+// Confusiones de dígitos más frecuentes de Tesseract sobre escaneos.
+const OCR_CONFUSION={'0':['8','6','9'],'1':['7','4'],'2':['7','3'],'3':['8','9','2'],
+  '4':['1','9'],'5':['6','8','3'],'6':['5','8','0'],'7':['1','2'],
+  '8':['0','6','3','5'],'9':['0','4','3']};
+// Intenta reparar un RUT que no cuadra: cambia UN dígito por sus confusiones
+// típicas y se queda con la variante que (a) valida por módulo 11 y (b) está
+// en la nómina. Solo devuelve resultado si la respuesta es ÚNICA — si dos
+// variantes distintas caen en la nómina la lectura es ambigua, y es más
+// honesto dejarla sin resolver que atribuirle el documento al trabajador
+// equivocado.
+function ren_repararRut(r,nomina){
+  const s=limpRut(r);
+  if(!nomina||!/^[0-9]{7,8}[0-9k]$/.test(s))return null;
+  const cuerpo=s.slice(0,-1);
+  const hits=new Set();
+  for(let i=0;i<cuerpo.length;i++){
+    for(const alt of (OCR_CONFUSION[cuerpo[i]]||[])){
+      const nc=cuerpo.slice(0,i)+alt+cuerpo.slice(i+1);
+      const cand=nc+rutDV(nc);
+      if(esEmpresa(cand))continue;
+      if(nomina[cand])hits.add(cand);
+    }
+  }
+  return hits.size===1?[...hits][0]:null;
+}
+// Elige el mejor RUT para un grupo de páginas, del más confiable al menos:
+//   1. leído Y presente en la nómina;
+//   2. leído roto pero reparable de forma única contra la nómina;
+//   3. sin nómina que confirme, el que al menos valide módulo 11.
+function ren_elegirRut(rutsSet,nomina){
+  const cands=[...rutsSet].filter(Boolean);
+  for(const r of cands){if(nomina&&nomina[r])return r;}
+  for(const r of cands){const fix=ren_repararRut(r,nomina);if(fix)return fix;}
+  return cands.find(rutValido)||cands[0]||null;
+}
 
 // ══════════════════════════════════════════
 // EXTRACCIÓN DE RUT
@@ -2084,6 +2147,37 @@ function esFichaIngreso(textoNorm){
 }
 
 // ══════════════════════════════════════════
+// INICIO FUERTE DE DOCUMENTO
+// ══════════════════════════════════════════
+// detectarInicio() dice QUÉ tipo de documento parece ser una página, pero no
+// si esa página EMPIEZA un documento nuevo — y con documentos de una sola
+// página por trabajador (los anexos de Akro) esa diferencia lo es todo.
+//
+// El agrupador venía asumiendo "esta página continúa el documento anterior
+// salvo que el RUT lo contradiga". Con OCR eso falla por EXCESO: basta que
+// una página no entregue un RUT legible para que se pegue a la anterior.
+// Caso real (24-08-2026): 118 páginas de anexos, un trabajador por página,
+// terminaron agrupadas en 3 archivos con nombres sacados de la zona de firma
+// ("Firman Rut de Conformidad - AnexoCargo.pdf").
+//
+// Esta función invierte el gate para el caso seguro: si la página trae en su
+// encabezado el TÍTULO de un documento, es un documento nuevo, punto.
+const TITULOS_DOC_COMPACTOS=[
+  'anexodecontratodetrabajo','anexoalcontratoindividualdetrabajo',
+  'contratodetrabajo','contratoindividualdetrabajo',
+  'finiquitodecontrato','notificaciondeamonestacion','amonestacionescrita',
+  'certificadodevacaciones','certificadodenacimiento',
+  'certificadodealumnoregular','fichaingresopersonalnuevo',
+  'pactodehorasextraordinarias','pactodeintegridad',
+  'canalesdedenuncialeykarin','modelodeprevenciondedelitos',
+];
+function esInicioFuerteDoc(texto){
+  const lineas=(texto||'').split('\n').map(l=>l.trim()).filter(l=>l);
+  const encC=normCompacto(lineas.slice(0,8).join(' '));
+  return TITULOS_DOC_COMPACTOS.some(t=>encC.includes(t));
+}
+
+// ══════════════════════════════════════════
 // DETECCIÓN DE INICIO DE DOCUMENTO (replica Python exacto)
 // ══════════════════════════════════════════
 function detectarInicio(texto, tipoNombreArchivo){
@@ -2091,6 +2185,10 @@ function detectarInicio(texto, tipoNombreArchivo){
   const enc2=norm(lineas.slice(0,2).join(' '));
   const enc8=norm(lineas.slice(0,8).join(' '));
   const tn=norm(texto||'');
+  // Versiones compactadas: los títulos vienen espaciados letra por letra
+  // ("A N E X O  D E  C O N T R A T O"), invisibles para un includes normal.
+  const enc2c=normCompacto(lineas.slice(0,2).join(' '));
+  const enc8c=normCompacto(lineas.slice(0,8).join(' '));
 
   // 1. FICHA
   if(esFichaIngreso(tn))return 'Ficha';
@@ -2153,9 +2251,9 @@ function detectarInicio(texto, tipoNombreArchivo){
   }
 
   // 4. FLUJO NORMAL — AnexoContrato y Contrato solo en enc2
-  if(enc2.includes('anexo de contrato de trabajo'))return 'AnexoContrato';
-  if(enc2.includes('anexo al contrato individual de trabajo'))return 'AnexoRemplazo';
-  if(enc2.includes('contrato de trabajo')&&!enc8.includes('finiquito'))return 'Contrato';
+  if(enc2.includes('anexo de contrato de trabajo')||enc2c.includes('anexodecontratodetrabajo'))return 'AnexoContrato';
+  if(enc2.includes('anexo al contrato individual de trabajo')||enc2c.includes('anexoalcontratoindividualdetrabajo'))return 'AnexoRemplazo';
+  if((enc2.includes('contrato de trabajo')||enc2c.includes('contratodetrabajo'))&&!enc8.includes('finiquito')&&!enc8c.includes('finiquito'))return 'Contrato';
 
   // Fallback: si el nombre del archivo da una pista, úsala
   if(tipoNombreArchivo)return tipoNombreArchivo;
@@ -2300,6 +2398,45 @@ async function va_procesarArchivosEnParalelo(items,poolSize,procesarUno){
   await Promise.all(pool.slice(0,poolSize).map(w=>consumidor(w)));
 }
 
+// ══════════════════════════════════════════
+// PREPROCESADO DE IMAGEN PARA OCR
+// ══════════════════════════════════════════
+// Tesseract lee bastante mejor un escaneo con el fondo limpio y el trazo
+// oscuro que el gris lavado que deja la fotocopiadora. Es puro canvas: no
+// agrega ninguna dependencia ni ninguna llamada externa.
+// A propósito NO binariza del todo (blanco o negro puro): con umbral duro se
+// rompen las letras finas de estos anexos. La rampa intermedia conserva el
+// antialiasing que Tesseract usa para desambiguar caracteres parecidos.
+function ren_preprocesarCanvas(cv){
+  try{
+    const out=document.createElement('canvas');
+    out.width=cv.width;out.height=cv.height;
+    const ctx=out.getContext('2d',{willReadFrequently:true});
+    ctx.drawImage(cv,0,0);
+    const img=ctx.getImageData(0,0,out.width,out.height);
+    const d=img.data;
+    for(let i=0;i<d.length;i+=4){
+      const g=d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114;
+      d[i]=d[i+1]=d[i+2]=g<110?0:(g>185?255:Math.round((g-110)*255/75));
+    }
+    ctx.putImageData(img,0,0);
+    return out;
+  }catch(e){return cv;}
+}
+// Puntaje de una lectura OCR: cuánto texto trajo, con premio si aparece algo
+// con forma de RUT (el dato que de verdad se necesita de estas páginas).
+function ren_scoreTexto(t){
+  const limpio=String(t||'').replace(/\s/g,'');
+  return limpio.length+(/\d{1,2}[.\s]?\d{3}[.\s]?\d{3}[-\s]?[\dkK]/.test(t||'')?200:0);
+}
+// ¿La lectura salió tan pobre como para justificar probar otras orientaciones?
+function ren_lecturaPobre(t){
+  const limpio=String(t||'').replace(/\s/g,'');
+  if(limpio.length<120)return true;   // prácticamente nada legible
+  if(limpio.length>=400)return false; // texto abundante: la página está derecha
+  return !/\d{1,2}[.\s]?\d{3}[.\s]?\d{3}[-\s]?[\dkK]/.test(t||'');
+}
+
 // Extraer texto de página — texto embebido primero, OCR como fallback
 async function extraerTextoPagina(pdfjsDoc,pageNum){
   const pg=await pdfjsDoc.getPage(pageNum);
@@ -2329,34 +2466,39 @@ async function extraerTextoPagina(pdfjsDoc,pageNum){
       canvasBase.width=vp.width;canvasBase.height=vp.height;
       await pg.render({canvasContext:canvasBase.getContext('2d'),viewport:vp}).promise;
 
-      // ── DETECCIÓN DE ORIENTACIÓN (rango 360°) ──────────────────
-      // Algunas páginas escaneadas quedan giradas 90/180/270°. Probamos
-      // las 4 rotaciones con un OCR rápido sobre la franja superior y nos
-      // quedamos con la que produce más texto reconocible (o con forma de RUT).
-      const rotaciones=[0,90,180,270];
-      let mejorScore=-1, mejorCv=canvasBase;
-      for(const deg of rotaciones){
-        const cvFull=deg===0?canvasBase:lib_rotarCanvas(canvasBase,deg);
-        const altoTest=Math.max(300, Math.floor(cvFull.height*0.35));
-        const cvTest=document.createElement('canvas');
-        cvTest.width=cvFull.width; cvTest.height=altoTest;
-        cvTest.getContext('2d').drawImage(cvFull,0,0,cvFull.width,altoTest,0,0,cvFull.width,altoTest);
-        let textoTest='';
-        try{
-          const blobTest=await new Promise(res=>cvTest.toBlob(res,'image/png'));
-          const {data:{text:tTest}}=await ren_ocrWorker.recognize(blobTest);
-          textoTest=tTest||'';
-        }catch(e){}
-        const limpio=textoTest.replace(/\s/g,'');
-        let score=limpio.length;
-        if(/\d{1,2}[.\s]?\d{3}[.\s]?\d{3}[-\s]?[\dkK]/i.test(textoTest)) score+=200;
-        if(deg===0) score+=5; // leve preferencia por la orientación original ante empates
-        if(score>mejorScore){ mejorScore=score; mejorCv=cvFull; }
-      }
+      // ── ORIENTACIÓN: se prueba sólo si hace falta ──────────────
+      // Antes se corrían SIEMPRE 4 OCR de prueba (uno por rotación, sobre la
+      // franja superior) MÁS el OCR definitivo = 5 pasadas por página, aun
+      // cuando la página estaba perfectamente derecha, que es el caso normal.
+      // Medido sobre los anexos reales (24-08-2026, 118 páginas escaneadas a
+      // scale 3.0 con el paquete "best"), eso daba minutos POR PÁGINA: el lote
+      // completo no terminaba nunca.
+      // Ahora: una sola pasada en la orientación original y, únicamente si esa
+      // lectura sale pobre, se prueban las otras tres. Las páginas derechas
+      // (la enorme mayoría) pasan de 5 pasadas a 1, y las torcidas siguen
+      // resolviéndose igual que antes — la cobertura 360° no se pierde.
+      let mejor='';
+      try{
+        const blob0=await new Promise(res=>ren_preprocesarCanvas(canvasBase).toBlob(res,'image/png'));
+        const {data:{text:t0}}=await ren_ocrWorker.recognize(blob0);
+        mejor=t0||'';
+      }catch(e){}
 
-      const blob=await new Promise(res=>mejorCv.toBlob(res,'image/png'));
-      const {data:{text}}=await ren_ocrWorker.recognize(blob);
-      txt=text||txt;
+      if(ren_lecturaPobre(mejor)){
+        let mejorScore=ren_scoreTexto(mejor);
+        for(const deg of [90,180,270]){
+          let tRot='';
+          try{
+            const cvRot=ren_preprocesarCanvas(lib_rotarCanvas(canvasBase,deg));
+            const blobR=await new Promise(res=>cvRot.toBlob(res,'image/png'));
+            const {data:{text:tR}}=await ren_ocrWorker.recognize(blobR);
+            tRot=tR||'';
+          }catch(e){}
+          const sc=ren_scoreTexto(tRot);
+          if(sc>mejorScore){mejorScore=sc;mejor=tRot;}
+        }
+      }
+      txt=mejor||txt;
     }catch(e){console.warn('OCR falló pág',pageNum,e);}
   }
 
@@ -2438,22 +2580,39 @@ async function cargarExcel(file){
     if(h.includes('nombre completo'))iNom=c;
     if(h.includes('fecha termino')||h.includes('fecha término'))iFT=c;
   }
-  // Fallback a posiciones por defecto si no se encontraron
-  if(iCod<0)iCod=1;if(iRut<0)iRut=2;if(iNom<0)iNom=3;if(iFT<0)iFT=5;
+  // Fallback a posiciones por defecto si no se encontraron.
+  // OJO: iFT (Fecha Término) NO lleva fallback posicional, a propósito. Es un
+  // filtro EXCLUYENTE: si apunta a la columna equivocada descarta a TODA la
+  // nómina en silencio. Caso real (24-08-2026): "Firma Documentos.xlsx" no
+  // trae Fecha Término; el fallback iFT=5 caía sobre "Fecha Creación" (que
+  // SIEMPRE tiene valor), así que todas las filas se leían como desvinculadas
+  // y el mapa de trabajadores quedaba VACÍO. Efecto visible: ningún documento
+  // conseguía nombre desde el Excel y todos caían al fallback de adivinarlo
+  // desde el texto del PDF.
+  if(iCod<0)iCod=1;if(iRut<0)iRut=2;if(iNom<0)iNom=3;
 
   for(let i=hdrIdx+1;i<rows.length;i++){
     const row=rows[i];
     const rut=limpRut(String(row[iRut]||''));
     if(!rut||rut.length<7||rut==='nan')continue;
-    const ft=row[iFT];
-    // Solo vigentes: fecha término vacía o nan
-    const desvinc=ft instanceof Date||(ft&&String(ft).trim()&&String(ft).trim().toLowerCase()!=='nan'&&String(ft).trim()!=='');
-    if(desvinc)continue;
-    const cod=String(row[iCod]||'').trim();
-    if(!cod||cod==='nan')continue;
-    map[rut]={nombre:String(row[iNom]||'').trim(),codigoFicha:cod};
-    // variante sin dígito verificador
-    if(rut.length>1)map[rut.slice(0,-1)]={nombre:String(row[iNom]||'').trim(),codigoFicha:cod};
+    // Solo vigentes — pero SOLO si la planilla realmente trae Fecha Término.
+    if(iFT>=0){
+      const ft=row[iFT];
+      const desvinc=ft instanceof Date||(ft&&String(ft).trim()&&String(ft).trim().toLowerCase()!=='nan'&&String(ft).trim()!=='');
+      if(desvinc)continue;
+    }
+    let cod=String(row[iCod]||'').trim();
+    if(cod==='nan')cod='';
+    // Sin código de ficha el trabajador se carga IGUAL: el módulo DOCUMENTOS
+    // solo necesita el nombre. Antes un `continue` acá lo borraba de la nómina
+    // entera, y el módulo BUK reportaba el engañoso "RUT_NO_EN_EXCEL" para
+    // alguien que sí estaba. Ahora BUK lo marca SIN_CODIGO_FICHA, que es lo
+    // que realmente pasa.
+    const nombre=String(row[iNom]||'').trim();
+    if(!nombre)continue;
+    map[rut]={nombre,codigoFicha:cod};
+    // variante sin dígito verificador (no piso una entrada exacta ya cargada)
+    if(rut.length>1&&!map[rut.slice(0,-1)])map[rut.slice(0,-1)]={nombre,codigoFicha:cod};
   }
   return map;
 }
@@ -2498,7 +2657,7 @@ async function ren_procesar(){
       let fechaInicio='';
       if(inicio==='Anexo42Horas'){const r42=extraerRutAnexo42(txtEnriq);if(r42)ruts=[r42];}
       if(inicio==='CertificadoVacaciones'){fechaInicio=extraerFechaVacaciones(txtEnriq);}
-      paginasData.push({i:p-1,texto:txtEnriq,inicio,ruts,fechaInicio});
+      paginasData.push({i:p-1,texto:txtEnriq,inicio,ruts,fechaInicio,fuerte:esInicioFuerteDoc(txtEnriq)});
     }
 
     // FICHA: todo el PDF junto
@@ -2522,9 +2681,9 @@ async function ren_procesar(){
     const grupos=[];let actual=null;
     for(const pd of paginasData){
       if(actual===null){
-        actual={tipo:pd.inicio||tipoNombre||'Documento',paginas:[pd.i],ruts:new Set(pd.ruts),rutPrincipal:pd.ruts[0]||null,fechaInicio:pd.fechaInicio};
+        actual={tipo:pd.inicio||tipoNombre||'Documento',paginas:[pd.i],ruts:new Set(pd.ruts),rutPrincipal:pd.ruts[0]||null,fechaInicio:pd.fechaInicio,fuerte:pd.fuerte};
         grupos.push(actual);
-      } else if(pd.inicio!==null){
+      } else if(pd.inicio!==null||pd.fuerte){
         const rutPag=pd.ruts[0]||null;
         const rutActual=actual.rutPrincipal;
         const rutDif=rutPag&&rutActual&&rutPag!==rutActual;
@@ -2533,21 +2692,23 @@ async function ren_procesar(){
           actual={tipo:'Anexo42Horas',paginas:[pd.i],ruts:new Set(pd.ruts),rutPrincipal:rutPag,fechaInicio:''};
           grupos.push(actual);continue;
         }
-        const esCont=!rutDif&&!rutNuevo&&TIPOS_CONT_MULTI.includes(actual.tipo);
+        // pd.fuerte = la página trae el TÍTULO de un documento en su
+        // encabezado → arranca uno nuevo, sin importar lo que diga el RUT.
+        // Antes esto dependía solo de que el RUT cambiara, y una página con
+        // el RUT ilegible se pegaba silenciosamente a la anterior.
+        const esCont=!pd.fuerte&&!rutDif&&!rutNuevo&&TIPOS_CONT_MULTI.includes(actual.tipo);
         if(esCont){actual.paginas.push(pd.i);pd.ruts.forEach(r=>actual.ruts.add(r));if(!actual.fechaInicio&&pd.fechaInicio)actual.fechaInicio=pd.fechaInicio;}
-        else{actual={tipo:pd.inicio||tipoNombre||'Documento',paginas:[pd.i],ruts:new Set(pd.ruts),rutPrincipal:rutPag,fechaInicio:pd.fechaInicio};grupos.push(actual);}
+        else{actual={tipo:pd.inicio||tipoNombre||'Documento',paginas:[pd.i],ruts:new Set(pd.ruts),rutPrincipal:rutPag,fechaInicio:pd.fechaInicio,fuerte:pd.fuerte};grupos.push(actual);}
       } else {
         actual.paginas.push(pd.i);pd.ruts.forEach(r=>actual.ruts.add(r));
         if(!actual.fechaInicio&&pd.fechaInicio)actual.fechaInicio=pd.fechaInicio;
       }
     }
 
-    // Asignar RUT
+    // Asignar RUT — prioriza el que está en la nómina, después intenta
+    // reparar una lectura rota del OCR, y recién ahí acepta uno sin confirmar.
     for(const g of grupos){
-      let rut=null;
-      for(const r of g.ruts){if(r&&ren_trabajadores[r]){rut=r;break;}}
-      if(!rut){const cands=[...g.ruts].filter(r=>r);if(cands.length)rut=cands[0];}
-      g.rut=rut;
+      g.rut=ren_elegirRut(g.ruts,ren_trabajadores);
     }
 
     // Generar registros y agregar a tabla EN TIEMPO REAL
@@ -2556,10 +2717,17 @@ async function ren_procesar(){
       let motivo='OK',estado='ok';
       if(!rut){motivo='SIN_RUT';estado='err';}
       else if(!ren_trabajadores[rut]){const alt=rut.slice(0,-1);if(ren_trabajadores[alt])rut=alt;else{motivo=`RUT_NO_EN_EXCEL (${rut})`;estado='warn';}}
+      if(motivo==='OK'&&ren_trabajadores[rut]&&!ren_trabajadores[rut].codigoFicha){motivo='SIN_CODIGO_FICHA';estado='warn';}
       if(motivo==='OK'&&PAGINAS_ESPERADAS[tipo]){
         const[mn,mx]=PAGINAS_ESPERADAS[tipo];
         const tipoSoloNombre=(npags===1&&tipoNombre===tipo);
-        if(!tipoSoloNombre){
+        // Un documento de UNA sola página que trae su propio título en el
+        // encabezado (g.fuerte) y su propio RUT está COMPLETO — no le falta
+        // nada. Los anexos de Akro son exactamente así, y PAGINAS_ESPERADAS
+        // los daba por incompletos (AnexoCargo espera 2-3 págs), mandando las
+        // 118 páginas a "⚠ Revisar" y dejándolas fuera del "Descargar solo OK".
+        const unaPagCompleta=(npags===1&&g.fuerte&&rut);
+        if(!tipoSoloNombre&&!unaPagCompleta){
           if(npags<mn){motivo=`POCAS_PAG (${npags}/${mn}-${mx})`;estado='warn';}
           else if(npags>mx){motivo=`MUCHAS_PAG (${npags}/${mn}-${mx})`;estado='warn';}
         }
@@ -3669,6 +3837,26 @@ function doc_extraerNombreDesdeTexto(textoCompleto){
     'trabajador','trabajadora','empleador','empleadora','declara','haber','prestado',
     'servicios','calidad','cargo','desde','hasta','fecha','contrato','plazo',
     'certifico','certifica','documento','jurada','jurado','entre','condes',
+    // Vocabulario de la zona de FIRMA y del cuerpo del anexo. Sin esto, el
+    // escalón E6 (ventana antes del RUT) arma nombres con lo que encuentra
+    // pegado al RUT del pie de página — de ahí salieron los archivos reales
+    // "Firman Rut de Conformidad", "Dor Ut Conformidad Firman" y
+    // "Abajrdor Rut Firman Ana" (24-08-2026).
+    'firman','firma','firmas','conformidad','constancia','senal','señal',
+    'anexo','anexos','actualizacion','actualización','renta','sueldo','base',
+    'clausula','cláusula','clausulas','cláusulas','instrumento','partes',
+    'presente','individual','modificar','terminos','términos','exponen',
+    'siguiente','siguientes','convenido','denominara','denominará','sucesivo',
+    'nacionalidad','chilena','chileno','estado','civil','cedula','cédula',
+    'identidad','nacido','nacida','domiciliado','domiciliada','correo',
+    'electronico','electrónico','comuna','procedente','ciudad','avenida',
+    'santiago','constancia','pesos','brutos','mensual','periodo','dias','días',
+    'trabajados','proporcional','reemplaza','totalidad','previas','desuso',
+    'cualquier','practica','práctica','anterior','cuestion','cuestión',
+    'aceptada','conocimiento','modificado','regira','regirá','integramente',
+    'íntegramente','desempena','desempeña','acuerdan','percibira','percibirá',
+    'servicios','cantidades','continuacion','continuación','detallan',
+    'conceptos','indican','ambos','domiciliados','representada','empresa',
     'las','los','del','por','con','que','una','para','como','bajo','este',
     'ese','esa','todo','toda','dicho','dicha','mismo','misma','cuyo','cuya'
   ]);
@@ -3704,7 +3892,7 @@ function doc_extraerNombreDesdeTexto(textoCompleto){
   // E1: "Don/Doña NOMBRE ... Rut XX" — finiquitos y contratos
   // Orden doc: NOMBRE APELLIDO → invertir. Tomamos el ÚLTIMO match (trabajador va después del representante)
   // Acepta iniciales con punto: "Franck L. Ally"
-  const patDon = /(?:don|do[nñ]a)\s+((?:[A-ZÁÉÍÓÚÑa-záéíóúñ][A-Za-záéíóúñÁÉÍÓÚÑ\-]*\.?\s+){1,5}[A-ZÁÉÍÓÚÑa-záéíóúñ][A-Za-záéíóúñÁÉÍÓÚÑ\-]+)\s+(?:Rut|R\.?U\.?T\.?)\s*[,:\s]/gi;
+  const patDon = /\bdo[nñ]a?\b\s*(?:\(\s*[a-zñA-ZÑ]{0,3}\s*\)\s*)?\s*((?:[A-ZÁÉÍÓÚÑa-záéíóúñ][A-Za-záéíóúñÁÉÍÓÚÑ'’\-]*\.?\s+){1,5}[A-ZÁÉÍÓÚÑa-záéíóúñ][A-Za-záéíóúñÁÉÍÓÚÑ'’\-]+)\s+(?:Rut|R\.?U\.?T\.?)\s*[,:\s]/gi;
   const candidatosDon = [];
   let m;
   while((m = patDon.exec(txt)) !== null){
@@ -3717,9 +3905,19 @@ function doc_extraerNombreDesdeTexto(textoCompleto){
     return doc_capitalizar(doc_invertirOrden(candidatosDon[candidatosDon.length - 1]).join(' '));
   }
 
-  // E2: "Don(ña)NOMBRE APELLIDO, de nacionalidad" — contratos/anexos Akro
-  // Acepta iniciales con punto dentro del nombre
-  const patAnexo = /(?:don|do[nñ]a)\s*\)?\s*((?:[A-ZÁÉÍÓÚÑa-záéíóúñ][A-Za-záéíóúñÁÉÍÓÚÑ\-]*\.?\s+){1,5}[A-ZÁÉÍÓÚÑa-záéíóúñ][A-Za-záéíóúñÁÉÍÓÚÑ\-]+)(?:,?\s+de\s+nacionalidad|\s+c[eé]dula\s+nacional)/gi;
+  // E2: "Don (ña) NOMBRE APELLIDO, de nacionalidad" — contratos/anexos Akro.
+  // El marcador de género se imprime como "Don (ña)", y el OCR lo devuelve
+  // además como "Don (fia)", "Don (na)", "Don(ña)" o "Doña".
+  // El regex anterior era /(?:don|do[nñ]a)\s*\)?\s*/ : contemplaba el
+  // paréntesis de CIERRE pero no el de APERTURA, así que sobre el texto real
+  // "Don (ña) Rosa Alejandra Arce Vergara, de nacionalidad" NO matcheaba —
+  // ni siquiera con OCR perfecto. El nombre terminaba saliendo del escalón E6
+  // (ventana de texto antes del RUT), que en estos anexos cae sobre la zona de
+  // firma y produce nombres inventados del tipo "Firman Rut de Conformidad".
+  // El bloque de género va como grupo opcional COMPLETO (con sus dos
+  // paréntesis) para no comerse la primera letra de un nombre real: sin eso,
+  // "Don Hector" perdía la H contra la clase [nñhf].
+  const patAnexo = /\bdo[nñ]a?\b\s*(?:\(\s*[a-zñA-ZÑ]{0,3}\s*\)\s*)?((?:[A-ZÁÉÍÓÚÑa-záéíóúñ][A-Za-záéíóúñÁÉÍÓÚÑ'’\-]*\.?\s+){1,5}[A-ZÁÉÍÓÚÑa-záéíóúñ][A-Za-záéíóúñÁÉÍÓÚÑ'’\-]+)\s*,?\s*(?:de\s+nacionalidad|c[eé]dula\s+nacional)/gi;
   const candidatosAnexo = [];
   while((m = patAnexo.exec(txt)) !== null){
     const raw = m[1].replace(/\s+/g,' ').trim();
@@ -3783,8 +3981,22 @@ function doc_armarNombreOrdenado(tokens){
   return doc_capitalizar(limpios.join(' '));
 }
 
+// Convierte el mapa de nómina (indexado por RUT) al formato que espera
+// va_matchNombreNomina: un array de objetos con .nombre, deduplicado — el
+// mapa trae cada trabajador dos veces (con y sin dígito verificador).
+function ren_nominaComoLista(trabajadores){
+  const vistos=new Set(),out=[];
+  for(const k in trabajadores){
+    const t=trabajadores[k];
+    if(!t||!t.nombre||vistos.has(t.nombre))continue;
+    vistos.add(t.nombre);out.push(t);
+  }
+  return out;
+}
+
 // Estado módulo DOCUMENTOS
 let doc_trabajadores={};
+let doc_nominaLista=[];
 
 let doc_resultados=[];
 let doc_pdfBuffers=[];
@@ -3891,9 +4103,10 @@ async function doc_procesar(){
     // Reutiliza la misma función cargarExcel del módulo BUK
     if(doc_excelFile){
       doc_trabajadores=await cargarExcel(doc_excelFile);
-      doc_setProg(15,`${Object.keys(doc_trabajadores).length/2|0} trabajadores vigentes cargados`);
+      doc_nominaLista=ren_nominaComoLista(doc_trabajadores);
+      doc_setProg(15,`${doc_nominaLista.length} trabajadores cargados desde el Excel`);
     } else {
-      doc_trabajadores={};
+      doc_trabajadores={};doc_nominaLista=[];
       doc_setProg(15,'Sin Excel — nombre se extraerá desde el PDF');
     }
 
@@ -3920,7 +4133,7 @@ async function doc_procesar(){
         let fechaInicio='';
         if(inicio==='Anexo42Horas'){const r42=extraerRutAnexo42(txtEnriq);if(r42)ruts=[r42];}
         if(inicio==='CertificadoVacaciones'){fechaInicio=extraerFechaVacaciones(txtEnriq);}
-        paginasData.push({i:p-1,texto:txtEnriq,inicio,ruts,fechaInicio});
+        paginasData.push({i:p-1,texto:txtEnriq,inicio,ruts,fechaInicio,fuerte:esInicioFuerteDoc(txtEnriq)});
       }
 
       // FICHA: todo el PDF junto
@@ -3935,11 +4148,16 @@ async function doc_procesar(){
         if(estado!=='err'){
           // 1º intento: Excel
           let nombreTrab=doc_formatearNombreTrabajador(doc_trabajadores[rut]?.nombre);
-          // 2º fallback: extraer del texto del PDF
+          // 2º fallback: extraer del texto del PDF (ver comentario extenso en
+          // el bloque de grupos, más abajo).
           if(!nombreTrab){
             const textoTotal=paginasData.map(p=>p.texto).join('\n');
-            nombreTrab=doc_extraerNombreDesdeTexto(textoTotal);
-            if(nombreTrab&&motivo==='OK')motivo='NOMBRE_DESDE_PDF';
+            const crudo=doc_extraerNombreDesdeTexto(textoTotal);
+            if(crudo){
+              const m=doc_nominaLista.length?va_matchNombreNomina(crudo,doc_nominaLista):null;
+              nombreTrab=m?doc_formatearNombreTrabajador(m.nombre):crudo;
+              if(motivo==='OK')motivo=m?'NOMBRE_CONFIRMADO_NOMINA':'NOMBRE_DESDE_PDF';
+            }
           }
           if(nombreTrab){
             nombreProp=doc_sanitizar(`${nombreTrab} - Ficha.pdf`);
@@ -3961,9 +4179,9 @@ async function doc_procesar(){
       const grupos=[];let actual=null;
       for(const pd of paginasData){
         if(actual===null){
-          actual={tipo:pd.inicio||tipoNombre||'Documento',paginas:[pd.i],ruts:new Set(pd.ruts),rutPrincipal:pd.ruts[0]||null,fechaInicio:pd.fechaInicio};
+          actual={tipo:pd.inicio||tipoNombre||'Documento',paginas:[pd.i],ruts:new Set(pd.ruts),rutPrincipal:pd.ruts[0]||null,fechaInicio:pd.fechaInicio,fuerte:pd.fuerte};
           grupos.push(actual);
-        } else if(pd.inicio!==null){
+        } else if(pd.inicio!==null||pd.fuerte){
           const rutPag=pd.ruts[0]||null;
           const rutActual=actual.rutPrincipal;
           const rutDif=rutPag&&rutActual&&rutPag!==rutActual;
@@ -3974,21 +4192,19 @@ async function doc_procesar(){
           }
           const maxPags=PAGINAS_ESPERADAS[actual.tipo]?PAGINAS_ESPERADAS[actual.tipo][1]:Infinity;
           const yaCompleto=actual.paginas.length>=maxPags&&pd.inicio===actual.tipo;
-          const esCont=!rutDif&&!rutNuevo&&!yaCompleto&&TIPOS_CONT_MULTI.includes(actual.tipo);
+          // pd.fuerte: ver comentario equivalente en ren_procesar.
+          const esCont=!pd.fuerte&&!rutDif&&!rutNuevo&&!yaCompleto&&TIPOS_CONT_MULTI.includes(actual.tipo);
           if(esCont){actual.paginas.push(pd.i);pd.ruts.forEach(r=>actual.ruts.add(r));if(!actual.fechaInicio&&pd.fechaInicio)actual.fechaInicio=pd.fechaInicio;}
-          else{actual={tipo:pd.inicio||tipoNombre||'Documento',paginas:[pd.i],ruts:new Set(pd.ruts),rutPrincipal:rutPag,fechaInicio:pd.fechaInicio};grupos.push(actual);}
+          else{actual={tipo:pd.inicio||tipoNombre||'Documento',paginas:[pd.i],ruts:new Set(pd.ruts),rutPrincipal:rutPag,fechaInicio:pd.fechaInicio,fuerte:pd.fuerte};grupos.push(actual);}
         } else {
           actual.paginas.push(pd.i);pd.ruts.forEach(r=>actual.ruts.add(r));
           if(!actual.fechaInicio&&pd.fechaInicio)actual.fechaInicio=pd.fechaInicio;
         }
       }
 
-      // Asignar RUT
+      // Asignar RUT — ver comentario equivalente en ren_procesar.
       for(const g of grupos){
-        let rut=null;
-        for(const r of g.ruts){if(r&&doc_trabajadores[r]){rut=r;break;}}
-        if(!rut){const cands=[...g.ruts].filter(r=>r);if(cands.length)rut=cands[0];}
-        g.rut=rut;
+        g.rut=ren_elegirRut(g.ruts,doc_trabajadores);
       }
 
       // Generar registros con nombre trabajador
@@ -4031,13 +4247,23 @@ async function doc_procesar(){
               motivo='SIN_NOMBRE';estado='warn';
             }
           } else {
-          // 1º intento: Excel
+          // 1º intento: Excel (el RUT ya identificó al trabajador)
           let nombreTrab=doc_formatearNombreTrabajador(doc_trabajadores[rut]?.nombre);
-          // 2º fallback: extraer nombre desde el texto del grupo
+          // 2º fallback: extraer el nombre desde el texto del grupo y, si hay
+          // nómina cargada, NORMALIZARLO a la grafía oficial. El matcher por
+          // tokens (va_matchNombreNomina) tolera errores de transcripción del
+          // OCR y se niega a resolver empates ambiguos, así que limpia el
+          // ruido sin arriesgar cruzar identidades. Sin esto, un nombre bien
+          // leído pero con una letra torcida generaba un archivo cuyo nombre
+          // no calzaba con el de BUK.
           if(!nombreTrab){
             const textoGrupo=g.paginas.map(pi=>paginasData.find(p=>p.i===pi)?.texto||'').join('\n');
-            nombreTrab=doc_extraerNombreDesdeTexto(textoGrupo);
-            if(nombreTrab&&motivo==='OK')motivo='NOMBRE_DESDE_PDF';
+            const crudo=doc_extraerNombreDesdeTexto(textoGrupo);
+            if(crudo){
+              const m=doc_nominaLista.length?va_matchNombreNomina(crudo,doc_nominaLista):null;
+              nombreTrab=m?doc_formatearNombreTrabajador(m.nombre):crudo;
+              if(motivo==='OK')motivo=m?'NOMBRE_CONFIRMADO_NOMINA':'NOMBRE_DESDE_PDF';
+            }
           }
           let tipoDisplay=tipo;
           if(tipo==='CertificadoVacaciones'){
