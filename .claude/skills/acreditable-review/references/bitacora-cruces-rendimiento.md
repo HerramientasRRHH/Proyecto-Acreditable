@@ -1274,3 +1274,62 @@ Pedido del usuario. Las tres se quitaron de `VA_BASES.Antofagasta.docs`, de las 
 - **Acreditación Mujeres** — la dotación femenina ya sale del Libro de Haberes (columna Sexo, ver
   `va_resumenLH`, que la muestra en los KPIs) y de la hoja MUJERES del IMPUT. Pedir un PDF aparte
   duplicaba lo mismo.
+
+---
+
+## 24-08-2026 — El informe PDF se comía el detalle 1x1 de los módulos de cruce
+
+Evidencia: `Informe_Validador_Antofagasta_Base única_2026-08-24.pdf`. Corrida
+donde el ÚNICO módulo adjuntado era Licencias Médicas. El informe entero
+dedicaba a ese módulo dos líneas:
+
+```
+3. Licencias Médicas
+esperados en LH: 49 — cubiertos: 49
+Sin diferencias contra el Libro de Haberes.
+```
+
+mientras el panel mostraba las **49 filas una por una** (`detalleCompleto`:
+estado, RUT, nombre, días LH, días doc, períodos encontrados).
+
+**Causa**: los módulos con bloque propio en `va_exportPDF` (Finiquitos,
+Jubilados, Contratos, Discapacidad, IMPUT) ya imprimían su detalle trabajador
+por trabajador. Los del **loop genérico `cruces`** (`libroasist`, `librorem`,
+`mujeres`, `anexos`, `cartanofirma`, `exencion`, `licencias`, `f30`, `f301`,
+`previred`) solo imprimían el resumen de `bits` y, si los había, la tabla de
+`faltantes`. Si no había faltantes salía `okBox('Sin diferencias…')` y
+listo — el detalle nunca se publicaba, justamente en el caso donde el módulo
+cerraba bien y el informe tenía que servir de respaldo.
+
+**Fix genérico, no por módulo** (`va_exportPDF`):
+- `vaImprimirDetalle(d,nombre)` — toma el primer array de detalle que
+  encuentre entre `detalleCompleto`, `detalleTrabajadores`, `detalleFPL`,
+  `detalleJubilados`, `detalle`, y arma las columnas con las **claves reales**
+  de los datos. Ordena Estado/RUT/Nombre primero (como el panel), tope de 8
+  columnas para que la tabla no se desborde a lo ancho de la hoja, filas
+  ordenadas por nombre, y pinta err/warn leyendo `estado` (❌/⚠ y también los
+  estados de texto: `faltante`, `discrepancia`, `sololistado`, `incompleto`,
+  `sinrespaldo`).
+- `vaImprimirExtras(d,principal)` — publica además **cualquier otro** array de
+  objetos del módulo que no sea el detalle principal ni `faltantes`
+  (ya impreso arriba). Esto recupera las tablas secundarias que el panel sí
+  mostraba: `diasNoCoinciden`, `paginasSinFecha`, `paginasSinAtribuir`,
+  `soloLH`, `soloImput`, etc.
+- `vaCelda()` normaliza los valores sin romper la tabla: booleanos como
+  SI/NO, arrays con `" | "`, y objetos chicos (`{faltas:1,permisos:0}` del
+  `detalleFPL` del Libro de Asistencia) como `"faltas 1 · permisos 0"`.
+  `rutNorm` se excluye siempre: es clave interna de cruce.
+
+Ser genérico es lo importante acá: un módulo que gane un array de detalle más
+adelante lo publica solo, sin tocar `va_exportPDF`.
+
+Validado con la forma real de `va_docResults['licencias']`: encabezados
+`Est. · RUT · Nombre · Días LH · Días doc · Observación (períodos
+encontrados)`, filas ordenadas por nombre, marcas `warn`/`err` correctas, y
+las dos tablas secundarias (`diasNoCoinciden`, `paginasSinFecha`) publicadas.
+
+**Nota de tamaño**: el Libro de Asistencia (`detalleFPL`) trae una fila por
+activo (~330 en Antofagasta), así que su sección del informe ahora ocupa
+varias páginas. Es deliberado — es exactamente el 1x1 que muestra el panel.
+La tabla de discrepancias específica de `libroasist` se mantiene aparte:
+una destaca los hallazgos, la otra deja constancia de todo lo revisado.

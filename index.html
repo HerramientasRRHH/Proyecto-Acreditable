@@ -19494,6 +19494,107 @@ function va_exportPDF(){
     }
   }
 
+  // ── Detalle 1x1 de cualquier módulo ──────────────────────────────
+  // Los módulos con bloque propio (Finiquitos, Jubilados, Contratos,
+  // Discapacidad) ya imprimían su detalle trabajador por trabajador. Los del
+  // loop genérico de abajo NO: solo sacaban el resumen y, si los había, los
+  // faltantes. Por eso una corrida donde Licencias Médicas cerraba sin
+  // diferencias salía en el informe como dos líneas ("esperados en LH: 49 ·
+  // cubiertos: 49" + "Sin diferencias contra el Libro de Haberes"), mientras
+  // el panel mostraba las 49 filas una por una (caso real 24-08-2026,
+  // Antofagasta Base única: era el ÚNICO módulo adjuntado de la corrida).
+  //
+  // Esta función imprime ese mismo detalle para CUALQUIER módulo: toma el
+  // primer array de detalle que encuentre y arma las columnas con las claves
+  // reales de los datos, así no hay que mantener una lista por módulo y los
+  // módulos que ganen un detalle más adelante lo publican solos.
+  const VA_DET_CAMPOS=['detalleCompleto','detalleTrabajadores','detalleFPL','detalleJubilados','detalle'];
+  const VA_DET_LABEL={estado:'Est.',rut:'RUT',nombre:'Nombre',diasLH:'Días LH',diasDoc:'Días doc',
+    periodos:'Observación (períodos encontrados)',pagina:'Pág.',paginas:'Págs.',cargo:'Cargo',
+    dias:'Días',enDoc:'En doc.',enListado:'En listado',obs:'Observación',archivo:'Archivo',
+    via:'Detectado por',falta:'Falta',diasLic:'Días Lic.',fecha:'Fecha',firma:'Firma',enLH:'En LH',
+    tieneLiq:'Liquidación',respaldos:'Respaldos',motivo:'Motivo',tipo:'Tipo',detalle:'Detalle',
+    certificados:'Certificados',lh:'Libro de Haberes',libro:'Libro',faltas:'Faltas',
+    permisos:'Permisos',licencias:'Licencias'};
+  // Convierte a texto cualquier valor del detalle sin romper la tabla:
+  // booleanos como SI/NO, arrays separados por " | ", y objetos chicos
+  // (ej. {faltas:1,permisos:0}) como "faltas 1 · permisos 0".
+  const vaCelda=v=>{
+    if(v==null||v==='')return '—';
+    if(Array.isArray(v))return v.map(vaCelda).join(' | ')||'—';
+    if(typeof v==='boolean')return v?'SI':'NO';
+    if(typeof v==='object')return Object.keys(v).map(k=>k+' '+vaCelda(v[k])).join(' · ');
+    return String(v);
+  };
+  const vaArrayDetalle=d=>{
+    for(const c of VA_DET_CAMPOS){
+      const a=d[c];
+      if(Array.isArray(a)&&a.length&&typeof a[0]==='object')return a;
+    }
+    return null;
+  };
+  const vaImprimirDetalle=(d,nombreModulo)=>{
+    const arr=vaArrayDetalle(d);
+    if(!arr)return;
+    // Claves presentes en alguna fila. rutNorm es de uso interno (clave de
+    // cruce normalizada), nunca va al informe.
+    const claves=[];
+    for(const f of arr)for(const k in f){
+      if(k==='rutNorm')continue;
+      if(!claves.includes(k))claves.push(k);
+    }
+    if(!claves.length)return;
+    // Estado / RUT / Nombre primero, como en el panel; el resto detrás.
+    const orden=['estado','rut','nombre'];
+    claves.sort((a,b)=>{
+      const ia=orden.indexOf(a),ib=orden.indexOf(b);
+      if(ia<0&&ib<0)return 0;
+      if(ia<0)return 1;
+      if(ib<0)return -1;
+      return ia-ib;
+    });
+    // Tope de columnas: más de 8 no entran a lo ancho de la hoja y la tabla
+    // sale ilegible. Las primeras son las que identifican al trabajador.
+    const cols=claves.slice(0,8);
+    const filas=[...arr].sort((a,b)=>String(a.nombre||'').localeCompare(String(b.nombre||''),'es'));
+    parrafo(`Detalle completo — ${filas.length} registro(s), las mismas filas que muestra el panel de ${nombreModulo}.`);
+    tabla(cols.map(k=>VA_DET_LABEL[k]||k),
+      filas.map(f=>cols.map(k=>vaCelda(f[k]))),
+      i=>{
+        const e=String(filas[i].estado||'');
+        if(e.indexOf('❌')>=0||e==='faltante'||e==='discrepancia')return 'err';
+        if(e.indexOf('⚠')>=0||e==='sololistado'||e==='incompleto'||e==='sinrespaldo')return 'warn';
+        return null;
+      });
+  };
+
+  // Además del detalle principal, cada módulo puede traer tablas
+  // secundarias que su panel SÍ muestra y el informe se estaba comiendo
+  // (Licencias, por ejemplo, muestra "días que no coinciden" y "páginas con
+  // fecha ilegible"). Se publican todas las que existan, sin lista fija por
+  // módulo: cualquier array de objetos que no sea el detalle principal ni la
+  // tabla de faltantes, que ya se imprime más arriba.
+  const VA_DET_SECC={diasNoCoinciden:'Días que no coinciden con el Libro de Haberes',
+    paginasSinFecha:'Páginas con trabajador identificado pero fecha ilegible (revisar a mano)',
+    paginasSinAtribuir:'Páginas que no se pudieron atribuir a ningún trabajador',
+    sinLiquidacion:'Sin Liquidación de Sueldo del mes',
+    soloLH:'Solo en el Libro de Haberes',soloImput:'Solo en el IMPUT',
+    sinRespaldo:'Sin respaldo documental',pendientes:'Pendientes de revisión'};
+  const VA_DET_OMITIR=['faltantes','faltantesLH'];
+  const vaImprimirExtras=(d,principal)=>{
+    for(const k in d){
+      if(k===principal||VA_DET_OMITIR.includes(k)||VA_DET_CAMPOS.includes(k))continue;
+      const a=d[k];
+      if(!Array.isArray(a)||!a.length||typeof a[0]!=='object')continue;
+      const claves=[];
+      for(const f of a)for(const c in f){if(c!=='rutNorm'&&!claves.includes(c))claves.push(c);}
+      if(!claves.length)continue;
+      const cols=claves.slice(0,8);
+      parrafo((VA_DET_SECC[k]||k)+` — ${a.length} registro(s)`,VA_PDF_AMBAR);
+      tabla(cols.map(c=>VA_DET_LABEL[c]||c),a.map(f=>cols.map(c=>vaCelda(f[c]))),()=>'warn');
+    }
+  };
+
   // ── Resto de módulos de cruce (mismo formato que su panel) ──
   const cruces=[['libroasist','Libro de Asistencia'],['librorem','Libro de Remuneraciones'],
     ['mujeres','Acreditación de Mujeres'],
@@ -19522,6 +19623,10 @@ function va_exportPDF(){
     }else if(!falt.length){
       okBox('Sin diferencias contra el Libro de Haberes.');
     }
+    // El 1x1 va SIEMPRE que el módulo lo tenga, haya o no diferencias: "sin
+    // diferencias" sin las filas detrás no se puede auditar ni archivar.
+    vaImprimirDetalle(d,nombre);
+    vaImprimirExtras(d,(VA_DET_CAMPOS.find(c=>Array.isArray(d[c])&&d[c].length&&typeof d[c][0]==='object')||''));
     if(id==='libroasist'&&d.detalleFPL&&d.detalleFPL.length){
       const disc=d.detalleFPL.filter(f=>f.estado==='discrepancia');
       if(disc.length){
