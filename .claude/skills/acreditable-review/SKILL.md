@@ -188,6 +188,33 @@ así que el mínimo control es:
    cuando termines.
 
 ### 8. Commit + push solo después de 5-7, nunca antes
+
+**Antes de `git add`/`git commit`, mirá la rama — otra vez.** No al empezar la
+sesión: **justo antes de commitear**.
+
+```
+git branch --show-current
+```
+
+Hay UNA sola copia de trabajo (`git worktree list` lo confirma) y varias
+sesiones de Claude trabajan sobre ella al mismo tiempo. La rama activa es un
+estado del DIRECTORIO, no de cada sesión: si otra sesión hace `git checkout`,
+te cambia la rama sin ningún aviso. Caso real (24-08-2026): la sesión del
+rebrand creó `kaizenflux-rebrand` a las 21:57; el commit de la mañana
+siguiente cayó ahí en vez de en `main`, y como Render despliega desde `main`,
+los arreglos quedaron sin publicar. La verificación de "estoy en main" tenía
+12 horas de antigüedad y ya estaba vencida.
+
+Mismo criterio para cualquier archivo compartido: `index.html` también lo
+editan dos sesiones a la vez. Preferí ediciones puntuales antes que reescribir
+el archivo entero, y confirmá con marcadores literales (`grep -c`) que el
+trabajo del otro sigue ahí antes de commitear.
+
+Si tenés que mover un commit de rama, **no uses `git checkout`**: te reescribe
+el working tree compartido y la otra sesión pierde de vista lo que está
+editando. Mové punteros:
+`git push origin <rama>:main` y `git branch -f main <sha>`.
+
 Mensaje de commit largo: qué bug es, qué evidencia real lo confirma (no
 "creo que" — números concretos de la auditoría), y cómo se validó el fix.
 Esto es lo que le permite a la próxima persona (o a vos, en el próximo
