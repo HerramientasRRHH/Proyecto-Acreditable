@@ -2,3 +2,12 @@ dist/
 node_modules/
 .env
 __pycache__/
+/config.js
+
+# Documentación real de RRHH (liquidaciones, finiquitos, licencias médicas,
+# contratos): datos personales de ~350 trabajadores — nombres, RUT, sueldos.
+# Se usa localmente para auditar el motor de lectura; NUNCA se versiona.
+/Documentos Antofagasta/
+/Documentos Lo Barnechea/
+/MOTOR VISUAL MULTICAPA/
+_tmp_*
